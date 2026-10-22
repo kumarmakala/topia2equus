@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Topia -> Equus EAFH historical assignment migration (S3 xlsx -> S3 xlsx)
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Existing bucket where Topia exports land
+  SourcePrefix:
+    Type: String
+    Default: topia/incoming/
+    Description: Only objects under this prefix trigger the migration
+  DestBucketName:
+    Type: String
+    Description: Existing bucket for Equus import files
+  DestPrefix:
+    Type: String
+    Default: equus/
+  KmsKeyArn:
+    Type: String
+    Default: ""
+    Description: Optional CMK used by the buckets (SSE-KMS); leave blank for SSE-S3
+
+Conditions:
+  UseKms: !Not [!Equals [!Ref KmsKeyArn, ""]]
+
+Resources:
+  FailedEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  MigrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 1024
+      Timeout: 300
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          DEST_BUCKET: !Ref DestBucketName
+          DEST_PREFIX: !Ref DestPrefix
+          SOURCE_PREFIX: !Ref SourcePrefix
+          SOURCE_SUFFIX: .xlsx
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailedEventsQueue.Arn
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Sid: ReadTopiaExports
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${SourceBucketName}/${SourcePrefix}*
+            - Sid: WriteEquusImports
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${DestBucketName}/${DestPrefix}*
+            - Sid: SendFailedEvents
+              Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !GetAtt FailedEventsQueue.Arn
+        - !If
+          - UseKms
+          - Version: "2012-10-17"
+            Statement:
+              - Sid: BucketEncryptionKey
+                Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey]
+                Resource: !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+
+  # Lets S3 invoke the function - only from the source bucket in this account.
+  S3InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MigrationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:s3:::${SourceBucketName}
+      SourceAccount: !Ref AWS::AccountId
+
+Outputs:
+  FunctionArn:
+    Value: !GetAtt MigrationFunction.Arn
+  FailedEventsQueueUrl:
+    Value: !Ref FailedEventsQueue

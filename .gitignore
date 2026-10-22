@@ -1,0 +1,13 @@
+# Real migration data contains personal information - never commit it.
+*.xlsx
+!lambda/src/templates/equus_eafh_template.xlsx
+!tests/fixtures/topia_sample.xlsx
+local_s3/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.aws-sam/
+.venv/
+.DS_Store
+~$*

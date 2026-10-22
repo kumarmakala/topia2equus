@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::__SOURCE_BUCKET__", "arn:aws:s3:::__SOURCE_BUCKET__/*"],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    },
+    {
+      "Sid": "OnlyXlsxUploadsToIncoming",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "NotResource": "arn:aws:s3:::__SOURCE_BUCKET__/topia/incoming/*.xlsx",
+      "Condition": { "StringNotLike": { "aws:PrincipalArn": "__ADMIN_ROLE_ARN__" } }
+    }
+  ]
+}

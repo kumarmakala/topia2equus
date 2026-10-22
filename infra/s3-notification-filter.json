@@ -1,0 +1,13 @@
+{
+  "Id": "topia-to-equus-migration",
+  "LambdaFunctionArn": "__FUNCTION_ARN__",
+  "Events": ["s3:ObjectCreated:*"],
+  "Filter": {
+    "Key": {
+      "FilterRules": [
+        { "Name": "prefix", "Value": "topia/incoming/" },
+        { "Name": "suffix", "Value": ".xlsx" }
+      ]
+    }
+  }
+}
