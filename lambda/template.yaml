@@ -36,11 +36,11 @@ Resources:
     Properties:
       CodeUri: src/
       Handler: handler.lambda_handler
-      Runtime: python3.12
+      Runtime: python3.13
       Architectures: [arm64]
       MemorySize: 1024
       Timeout: 300
-      ReservedConcurrentExecutions: 5
+      # Use shared account concurrency so deployment works with small quotas.
       Environment:
         Variables:
           DEST_BUCKET: !Ref DestBucketName

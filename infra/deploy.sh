@@ -17,9 +17,33 @@ if [[ "$SRC_BUCKET" == "$DEST_BUCKET" && "$DEST_PREFIX" == "$SRC_PREFIX"* ]]; th
   exit 1
 fi
 
+# Git Bash does not inherit interactive aliases such as sam='sam.cmd'.
+if command -v sam >/dev/null 2>&1; then
+  SAM_CMD=sam
+elif command -v sam.cmd >/dev/null 2>&1; then
+  SAM_CMD=sam.cmd
+else
+  echo "AWS SAM CLI was not found. Add sam or sam.cmd to PATH." >&2
+  exit 1
+fi
+
+# Validate Python before deploying; Windows may expose a non-working python3
+# Microsoft Store shortcut even when python is installed.
+PYTHON_CMD=""
+for candidate in python python3; do
+  if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info.major == 3 else 1)' >/dev/null 2>&1; then
+    PYTHON_CMD="$candidate"
+    break
+  fi
+done
+if [[ -z "$PYTHON_CMD" ]]; then
+  echo "Python 3 was not found. Add a working python or python3 to PATH." >&2
+  exit 1
+fi
+
 cd "$HERE/../lambda"
-sam build
-sam deploy --stack-name "$STACK" --capabilities CAPABILITY_IAM --resolve-s3 \
+"$SAM_CMD" build
+"$SAM_CMD" deploy --stack-name "$STACK" --capabilities CAPABILITY_IAM --resolve-s3 \
   --no-fail-on-empty-changeset \
   --parameter-overrides SourceBucketName="$SRC_BUCKET" DestBucketName="$DEST_BUCKET" \
                         SourcePrefix="$SRC_PREFIX" DestPrefix="$DEST_PREFIX"
@@ -28,7 +52,8 @@ FN_ARN=$(aws cloudformation describe-stacks --stack-name "$STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='FunctionArn'].OutputValue" --output text)
 
 CURRENT=$(aws s3api get-bucket-notification-configuration --bucket "$SRC_BUCKET")
-MERGED=$(CURRENT="$CURRENT" FN_ARN="$FN_ARN" SRC_PREFIX="$SRC_PREFIX" FILTER="$HERE/s3-notification-filter.json" python3 - <<'PY'
+# A relative path also works with native Windows Python under Git Bash.
+MERGED=$(CURRENT="$CURRENT" FN_ARN="$FN_ARN" SRC_PREFIX="$SRC_PREFIX" FILTER="../infra/s3-notification-filter.json" "$PYTHON_CMD" - <<'PY'
 import json, os
 cfg = json.loads(os.environ["CURRENT"] or "{}")
 new = json.load(open(os.environ["FILTER"]))
