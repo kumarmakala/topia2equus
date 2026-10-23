@@ -35,14 +35,47 @@ workbook, written to a destination S3 bucket together with a mapping report.
 
 ## Run locally
 
-```bash
-pip install openpyxl pytest
-python3 -m pytest -q tests
+Requires Python 3.9+ (3.12 recommended) and git.
 
-mkdir -p local_s3/source_s3/topia/incoming local_s3/dest_s3
-cp <topia-export>.xlsx local_s3/source_s3/topia/incoming/
-python3 local/run_local.py          # outputs land in local_s3/dest_s3/equus/
-```
+1. Clone and set up a virtual environment:
+
+   ```bash
+   git clone git@github.com:kumarmakala/topia2equus.git
+   cd topia2equus
+   python3 -m venv .venv
+   source .venv/bin/activate                    # Windows: .venv\Scripts\activate
+   pip install openpyxl==3.1.5 pytest
+   ```
+
+2. Run the tests:
+
+   ```bash
+   python3 -m pytest -q tests
+   ```
+
+3. Run the migration, with folders under `local_s3/` standing in for the
+   source and destination buckets:
+
+   ```bash
+   mkdir -p local_s3/source_s3/topia/incoming
+   cp <topia-export>.xlsx local_s3/source_s3/topia/incoming/
+   python3 local/run_local.py                   # every .xlsx under topia/incoming/
+   python3 local/run_local.py "topia/incoming/<file>.xlsx"   # or a single file
+   ```
+
+   Outputs land in `local_s3/dest_s3/equus/` (import file) and
+   `local_s3/dest_s3/equus/reports/` (mapping report).
+
+4. Optional: end-to-end run through real boto3 against moto-mocked S3,
+   including the trigger guards:
+
+   ```bash
+   pip install boto3 "moto[s3]"
+   python3 local/simulate_s3.py <topia-export>.xlsx <download-dir>
+   ```
+
+`*.xlsx` and `local_s3/` are git-ignored, so Topia exports must be copied to
+each machine by hand.
 
 ## Deploy
 
