@@ -119,6 +119,18 @@ CONTACT_COLUMNS = {
 CANCELLATION_REASON_LABEL = "cancellation reason"
 CANCELLED_PHASE = "Cancelled"
 
+# Equus headers that take ISO 3166-1 alpha-3 codes. Listed explicitly because
+# the template's row-1 rules are shifted one column against the row-3 keys in
+# columns Q-T (EMPLOYEE!BIRTH_COUNTRY has no rule; CF_TEXT016 has one).
+COUNTRY_HEADERS = {
+    "ASSIGNMENT!FROM_COUNTRY",
+    "ASSIGNMENT!TO_COUNTRY",
+    "EMPLOYEE!PRIMARY_CITIZENSHIP",
+    "EMPLOYEE!SECONDARY_CITIZENSHIP",
+    "EMPLOYEE!BIRTH_COUNTRY",
+    "ASSIGNMENT_MAILING_ADDRESS!COUNTRY_CODE",
+}
+
 # Default effective/begin dates to the assignment start date when the source
 # has a value but no date of its own.
 DEFAULT_DATES_FROM_START = True

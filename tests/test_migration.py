@@ -222,3 +222,15 @@ def test_strict_pending_refuses_output():
     from transform import PendingFieldsError
     with pytest.raises(PendingFieldsError):
         transform(SOURCE.read_bytes(), TEMPLATE.read_bytes(), strict_pending=True)
+
+
+def test_country_of_birth_converted_despite_shifted_template_rules():
+    # Template cols Q-T: row-1 rules sit one column left of their row-3 keys,
+    # so BIRTH_COUNTRY has no "country code" rule of its own.
+    src = _edit_source({(5, "Country of Birth"): "India"})
+    out, _, report = transform(src, TEMPLATE.read_bytes())
+    _, rows = _rows(out)
+    assert rows[0]["EMPLOYEE!BIRTH_COUNTRY"] == "IND"
+    template_warnings = {(f, m) for w, f, m in report.warnings if w == "template"}
+    assert any(f == "EMPLOYEE!BIRTH_COUNTRY" for f, _ in template_warnings)
+    assert any(f == "EMPLOYEE_CF!CF_TEXT016" for f, _ in template_warnings)

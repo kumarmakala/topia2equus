@@ -81,7 +81,7 @@ class TargetLayout:
         return "date format" in self.rules.get(header, "") or header.endswith("_DATE")
 
     def is_country(self, header: str) -> bool:
-        return "country code" in self.rules.get(header, "")
+        return header in cfg.COUNTRY_HEADERS
 
     def is_resource(self, header: str) -> bool:
         return "RESOURCE" in header
@@ -134,6 +134,17 @@ def column_colour(ws, c: int) -> str:
     if unknown:
         return f"unknown:{unknown[0]}"
     return "peach" if found else "none"
+
+
+def check_template(layout: TargetLayout, report: Report) -> None:
+    """Warn where the template's row-1 country rules disagree with COUNTRY_HEADERS."""
+    for header in layout.headers:
+        has_rule = "country code" in layout.rules.get(header, "")
+        if header in cfg.COUNTRY_HEADERS and not has_rule:
+            report.warn("template", header, "treated as country code, but row 1 has no 'Match Country Code' rule")
+        elif has_rule and header not in cfg.COUNTRY_HEADERS:
+            report.warn("template", header, "row 1 says 'Match Country Code' but header is not in COUNTRY_HEADERS; "
+                                            "rules may be shifted against row 3")
 
 
 def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
@@ -473,6 +484,7 @@ def transform(source_bytes: bytes, template_bytes: bytes,
     layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
     report = Report()
+    check_template(layout, report)
     report.columns = build_column_plan(src_ws, layout)
     pending = [c for c in report.columns if "PENDING" in c.flags and c.has_data]
     if strict_pending and pending:
