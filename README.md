@@ -15,9 +15,10 @@ workbook, written to a destination S3 bucket together with a mapping report.
 4. Output: one `INSERT` row per assignment, plus `UPDATE` rows for extra
    addresses, contacts and dependents, written into the bundled Equus template.
 5. Written to the destination bucket:
-   - `equus/<name>_EQUUS_<timestamp>.xlsx` - Equus import file
-   - `equus/reports/<name>_MAPPING_REPORT_<timestamp>.xlsx` - column mapping,
-     Equus coverage, dropdown values sent, warnings
+   - `equus/<name>_EQUUS_<etag>_<version>.xlsx` - Equus import file
+   - `equus/reports/<name>_MAPPING_REPORT_<etag>_<version>.xlsx` - column
+     mapping, governance, Equus coverage, dropdown values sent,
+     reconciliation, warnings
 
 ## Layout
 
@@ -35,7 +36,7 @@ workbook, written to a destination S3 bucket together with a mapping report.
 
 ## Run locally
 
-Requires Python 3.9+ (3.12 recommended) and git.
+Requires Python 3.9+ (3.12 recommended: it is the Lambda runtime) and git.
 
 1. Clone and set up a virtual environment:
 
@@ -44,7 +45,7 @@ Requires Python 3.9+ (3.12 recommended) and git.
    cd topia2equus
    python3 -m venv .venv
    source .venv/bin/activate                    # Windows: .venv\Scripts\activate
-   pip install openpyxl==3.1.5 pytest
+   pip install openpyxl==3.1.5 pytest boto3 "moto[s3]"   # moto: idempotency test
    ```
 
 2. Run the tests:
@@ -90,13 +91,35 @@ infra/deploy.sh <source-bucket> <dest-bucket> [source-prefix] [dest-prefix] [sta
 Real Topia/Equus workbooks contain personal data and are git-ignored. The
 committed template has header rows only, and the test fixture uses fake data.
 
+## Controls
+
+- **Colour governance:** the fills of source rows 1-4 are read as rules.
+  Red columns are excluded. Yellow columns are flagged `PENDING` (set
+  `STRICT_PENDING=true` to refuse output while they hold data). Cyan columns
+  without an Equus column are flagged `MISSING_TARGET`, and any other fill is
+  flagged `UNKNOWN_COLOUR`. See the report's Governance sheet.
+- **Validation:** warns on out-of-range numbers, cost-centre names that hold
+  codes, spouse/dependent records without a name, resource names missing from
+  `RESOURCE_MAP`, and dropdown values outside `lambda/src/equus_lists.json`
+  (optional). Warnings never change values.
+- **Reconciliation:** after writing, every mapped source cell is compared
+  with the written workbook. Unexplained differences fail the run: only a
+  `RECONCILIATION_FAILED` report is written, and the event goes to the
+  failure queue.
+- **Idempotency:** output keys are `<name>_EQUUS_<source ETag>_<code
+  version>.xlsx`. A duplicate S3 delivery is skipped; a mapping change
+  produces new keys.
+
 ## Open mapping questions
 
-- Source colour coding (red / yellow / light blue) was not present in the
-  files received; mapping is header-based and needs review via the report.
-- Assignment Identifier: Topia Assignment ID (current) vs Employee Number.
+See [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md), which gives the cell evidence,
+current behaviour and config setting for each one. In short:
+
+- Assignment Identifier: Topia Assignment ID (current) vs Employee Number
+  (Equus sample).
 - Resource fields need a name → Equus username list (`RESOURCE_MAP`).
-- Address text format, to split city / postal code / country.
-- Source of dependent data (the "Dependent Import" sheet has no employee key).
-- Defaults to confirm: effective dates from start date, International
-  Assignment derived from countries, PII Nationality excluded.
+- Home/Host currency has no source column.
+- Equus template columns Q-T: labels are shifted against field keys.
+- Yellow (pending), cyan-without-target (AG, DG) and brown (spouse) columns.
+- Address text format; source of dependent data (the "Dependent Import"
+  sheet has no employee key).
