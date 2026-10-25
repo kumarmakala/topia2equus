@@ -45,6 +45,10 @@ with mock_aws():
     res = handler.lambda_handler(event(SRC, key, len(body)), None)
     print(json.dumps(res, indent=2))
 
+    print("\n=== Duplicate delivery of the same event (should be skipped) ===")
+    dup = handler.lambda_handler(event(SRC, key, len(body)), None)["results"][0]
+    print(f"  {key}: {dup.get('skipped', 'NOT SKIPPED!')}")
+
     print("\n=== Trigger guard checks (all should be skipped) ===")
     s3.put_object(Bucket=SRC, Key="other/x.xlsx", Body=body)
     s3.put_object(Bucket=SRC, Key="topia/incoming/notes.csv", Body=b"a,b")

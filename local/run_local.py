@@ -8,6 +8,7 @@ Usage:
   python3 local/run_local.py "topia/incoming/x.xlsx"
 """
 
+import hashlib
 import io
 import os
 import sys
@@ -25,14 +26,28 @@ os.environ.setdefault("SOURCE_SUFFIX", ".xlsx")
 import handler  # noqa: E402
 
 
+class LocalS3Error(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
 class FolderS3:
-    """Implements the two S3 calls the handler makes, against local folders."""
+    """Implements the S3 calls the handler makes, against local folders."""
 
     def get_object(self, Bucket, Key):
-        return {"Body": io.BytesIO((BUCKETS / Bucket / Key).read_bytes())}
+        body = (BUCKETS / Bucket / Key).read_bytes()
+        return {"Body": io.BytesIO(body), "ETag": '"%s"' % hashlib.md5(body).hexdigest()}
 
-    def put_object(self, Bucket, Key, Body, **kwargs):
+    def head_object(self, Bucket, Key):
+        if not (BUCKETS / Bucket / Key).exists():
+            raise LocalS3Error("404")
+        return {}
+
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None, **kwargs):
         path = BUCKETS / Bucket / Key
+        if IfNoneMatch == "*" and path.exists():
+            raise LocalS3Error("PreconditionFailed")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(Body)
 

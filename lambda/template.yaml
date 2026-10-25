@@ -70,6 +70,19 @@ Resources:
               Effect: Allow
               Action: s3:PutObject
               Resource: !Sub arn:${AWS::Partition}:s3:::${DestBucketName}/${DestPrefix}*
+            # HeadObject on outputs = skip duplicate S3 deliveries (idempotency).
+            - Sid: CheckExistingOutputs
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${DestBucketName}/${DestPrefix}*
+            # Without ListBucket a missing key returns 403 instead of 404.
+            - Sid: ListDestPrefix
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !Sub arn:${AWS::Partition}:s3:::${DestBucketName}
+              Condition:
+                StringLike:
+                  s3:prefix: !Sub ${DestPrefix}*
             - Sid: SendFailedEvents
               Effect: Allow
               Action: sqs:SendMessage

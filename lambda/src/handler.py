@@ -18,11 +18,11 @@ Environment:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import posixpath
-from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote_plus
 
@@ -48,6 +48,46 @@ def s3_client():
 
 def _read(bucket: str, key: str) -> bytes:
     return s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+def _read_with_etag(bucket: str, key: str) -> tuple[bytes, str]:
+    obj = s3_client().get_object(Bucket=bucket, Key=key)
+    return obj["Body"].read(), obj["ETag"].strip('"')
+
+
+def _code_version(template: bytes) -> str:
+    """Short hash of the mapping code and template, so a mapping change gives
+    new output keys while a duplicate event for the same source does not."""
+    h = hashlib.sha256(template)
+    for name in ("transform.py", "mapping_config.py"):
+        h.update((Path(__file__).parent / name).read_bytes())
+    return h.hexdigest()[:8]
+
+
+def _error_code(exc: Exception) -> str | None:
+    return getattr(exc, "response", {}).get("Error", {}).get("Code")
+
+
+def _exists(bucket: str, key: str) -> bool:
+    try:
+        s3_client().head_object(Bucket=bucket, Key=key)
+        return True
+    except Exception as exc:  # botocore ClientError; not imported so local fakes work
+        if _error_code(exc) in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def _put_once(bucket: str, key: str, body: bytes, meta: dict) -> bool:
+    """Conditional write: False if the key already exists (concurrent duplicate)."""
+    try:
+        s3_client().put_object(Bucket=bucket, Key=key, Body=body, ContentType=XLSX_CONTENT_TYPE,
+                               Metadata=meta, IfNoneMatch="*")
+        return True
+    except Exception as exc:
+        if _error_code(exc) in ("PreconditionFailed", "412"):
+            return False
+        raise
 
 
 def _load_template() -> bytes:
@@ -101,27 +141,34 @@ def lambda_handler(event, context):
             results.append({"source": f"s3://{bucket}/{key}", "skipped": skip})
             continue
 
-        log.info("Migrating s3://%s/%s", bucket, key)
-        strict = os.environ.get("STRICT_PENDING", "false").lower() == "true"
-        output, report_bytes, report = transform(_read(bucket, key), template, strict_pending=strict)
-
+        body, etag = _read_with_etag(bucket, key)
+        # S3 delivers notifications at least once: keys are derived from the
+        # source ETag + code version, so a duplicate maps to the same objects.
         stem = posixpath.splitext(posixpath.basename(key))[0]
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = f"{etag[:12]}_{_code_version(template)}"
         out_key = f"{dest_prefix}{stem}_EQUUS_{stamp}.xlsx"
         report_key = f"{dest_prefix}reports/{stem}_MAPPING_REPORT_{stamp}.xlsx"
-        meta = {"source-bucket": bucket, "source-key": key[:1024]}
+        meta = {"source-bucket": bucket, "source-key": key[:1024], "source-etag": etag}
+        if _exists(dest_bucket, out_key):
+            log.info("Skipping s3://%s/%s: already processed as %s", bucket, key, out_key)
+            results.append({"source": f"s3://{bucket}/{key}", "skipped": "already processed"})
+            continue
+
+        log.info("Migrating s3://%s/%s", bucket, key)
+        strict = os.environ.get("STRICT_PENDING", "false").lower() == "true"
+        output, report_bytes, report = transform(body, template, strict_pending=strict)
         if not report.reconciliation_ok:
             # Keep the evidence, withhold the import file, and fail the
             # invocation so the event lands on the on-failure queue.
             failed_key = f"{dest_prefix}reports/{stem}_RECONCILIATION_FAILED_{stamp}.xlsx"
-            s3_client().put_object(Bucket=dest_bucket, Key=failed_key, Body=report_bytes,
-                                   ContentType=XLSX_CONTENT_TYPE, Metadata=meta)
+            _put_once(dest_bucket, failed_key, report_bytes, meta)
             raise RuntimeError(f"Reconciliation failed for s3://{bucket}/{key}; "
                                f"see s3://{dest_bucket}/{failed_key}")
-        s3_client().put_object(Bucket=dest_bucket, Key=out_key, Body=output,
-                               ContentType=XLSX_CONTENT_TYPE, Metadata=meta)
-        s3_client().put_object(Bucket=dest_bucket, Key=report_key, Body=report_bytes,
-                               ContentType=XLSX_CONTENT_TYPE, Metadata=meta)
+        if not _put_once(dest_bucket, out_key, output, meta):
+            log.info("Skipping s3://%s/%s: concurrent duplicate already wrote %s", bucket, key, out_key)
+            results.append({"source": f"s3://{bucket}/{key}", "skipped": "already processed"})
+            continue
+        _put_once(dest_bucket, report_key, report_bytes, meta)
 
         summary = {
             "source": f"s3://{bucket}/{key}",

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import sys
 from datetime import date, datetime
@@ -123,15 +124,29 @@ def test_child_records_become_update_rows():
 
 # --------------------------------------------------------------------------- handler
 
+class S3Error(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
 class FakeS3:
     def __init__(self, objects):
         self.objects = objects
         self.puts = {}
 
     def get_object(self, Bucket, Key):
-        return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
+        body = self.objects[(Bucket, Key)]
+        return {"Body": io.BytesIO(body), "ETag": '"%s"' % hashlib.md5(body).hexdigest()}
 
-    def put_object(self, Bucket, Key, Body, **kwargs):
+    def head_object(self, Bucket, Key):
+        if (Bucket, Key) not in self.puts:
+            raise S3Error("404")
+        return {}
+
+    def put_object(self, Bucket, Key, Body, IfNoneMatch=None, **kwargs):
+        if IfNoneMatch == "*" and (Bucket, Key) in self.puts:
+            raise S3Error("PreconditionFailed")
         self.puts[(Bucket, Key)] = Body
 
 
@@ -327,3 +342,45 @@ def test_handler_raises_and_writes_report_only_on_reconciliation_failure(fake_s3
         handler.lambda_handler(_event("src", "topia/incoming/FULL+HISTORICAL.xlsx"), None)
     keys = [k for _, k in fake_s3.puts]
     assert len(keys) == 1 and "RECONCILIATION_FAILED" in keys[0]
+
+
+# --------------------------------------------------------------------------- idempotency
+
+def test_duplicate_event_is_skipped(fake_s3):
+    event = _event("src", "topia/incoming/FULL+HISTORICAL.xlsx")
+    first = handler.lambda_handler(event, None)["results"][0]
+    second = handler.lambda_handler(event, None)["results"][0]
+    assert "output" in first
+    assert second["skipped"] == "already processed"
+    assert len(fake_s3.puts) == 2
+
+
+def test_output_key_changes_with_mapping_version(fake_s3, monkeypatch):
+    event = _event("src", "topia/incoming/FULL+HISTORICAL.xlsx")
+    first = handler.lambda_handler(event, None)["results"][0]
+    monkeypatch.setattr(handler, "_code_version", lambda template: "deadbeef")
+    second = handler.lambda_handler(event, None)["results"][0]
+    assert second["output"] != first["output"] and "deadbeef" in second["output"]
+
+
+def test_duplicate_s3_delivery_with_moto(monkeypatch):
+    moto = pytest.importorskip("moto")
+    import boto3
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("DEST_BUCKET", "equus-dest-test")
+    monkeypatch.setenv("DEST_PREFIX", "equus/")
+    monkeypatch.setenv("SOURCE_PREFIX", "topia/incoming/")
+    with moto.mock_aws():
+        s3 = boto3.client("s3")
+        monkeypatch.setattr(handler, "_s3", s3)
+        for b in ("topia-source-test", "equus-dest-test"):
+            s3.create_bucket(Bucket=b)
+        key = "topia/incoming/FULL HISTORICAL.xlsx"
+        s3.put_object(Bucket="topia-source-test", Key=key, Body=SOURCE.read_bytes())
+        event = _event("topia-source-test", key.replace(" ", "+"))
+        handler.lambda_handler(event, None)
+        handler.lambda_handler(event, None)
+        keys = [o["Key"] for o in s3.list_objects_v2(Bucket="equus-dest-test")["Contents"]]
+        assert len(keys) == 2, keys
