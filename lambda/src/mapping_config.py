@@ -149,6 +149,31 @@ VALUE_MAPS = {
     "EMPLOYEE!EMPLOYMENT_STATUS": {"employed": "Active"},
 }
 
+# Plausibility ranges (inclusive) for numeric fields. Out-of-range values are
+# kept but warned. The 80-hour ceiling is a review threshold, not a business
+# rule (source CU6 holds 158 host weekly hours); adjust once confirmed.
+NUMERIC_RANGES = {
+    "ASSIGNMENT_CF!CF_NUMBER003": (0, 80),  # host scheduled weekly hours
+    "ASSIGNMENT_CF!CF_NUMBER004": (0, 80),  # home scheduled weekly hours
+}
+
+# (code header, name header) pairs. A name equal to its code, or shaped like a
+# code, is warned (source BL5 holds the code "1000-US018907_NVC" as the name).
+CODE_NAME_PAIRS = [
+    ("ASSIGNMENT_CF!CF_TEXT005", "ASSIGNMENT_CF!CF_TEXT023"),  # home cost center
+    ("ASSIGNMENT_CF!CF_TEXT012", "ASSIGNMENT_CF!CF_TEXT024"),  # host cost center
+    ("ASSIGNMENT_CF!CF_TEXT027", "ASSIGNMENT_CF!CF_TEXT028"),  # mobility cost center
+    ("ASSIGNMENT_CF!CF_TEXT032", "ASSIGNMENT_CF!CF_TEXT033"),  # expense cost center
+]
+COST_CENTER_CODE_RE = r"^[\w-]+_[A-Z]VC$"  # every code in the sample ends _NVC / _DVC
+
+# Family records need a name to be imported as a person.
+FAMILY_PREFIXES = ("SPOUSE_DOMESTIC_PARTNER", "ASSIGNMENT_DEPENDENT")
+
+# Optional Equus dropdown lists, {"EQUUS!HEADER": ["Value", ...]}, bundled
+# next to this file when Equus supplies them. Missing file = no list check.
+ALLOWED_VALUES_FILE = "equus_lists.json"
+
 # Resource dropdowns (coordinator, HRBP, managers...) need Equus resource
 # usernames. Fill as {"Topia display name or email": "equus.username"}.
 RESOURCE_MAP = {}

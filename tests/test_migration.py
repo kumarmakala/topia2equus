@@ -243,3 +243,41 @@ def test_dirty_placeholder_blanked_with_cell_reference():
     assert "EMPLOYEE_CF!CF_TEXT013" not in rows[0]
     assert rows[0]["EMPLOYEE!FIRST_NAME"] == "Nancy"  # "na" token must not eat real names
     assert any(w == "source N5" and "placeholder" in m for w, _, m in report.warnings)
+
+
+# --------------------------------------------------------------------------- validation
+
+def _warnings_for(report, field):
+    return [(w, m) for w, f, m in report.warnings if f == field]
+
+
+def test_validation_warnings_keep_values():
+    src = _edit_source({
+        (5, "Host Scheduled Weekly Hours"): 158,
+        (5, "Host Cost Center Name"): "1000-US018907_NVC",
+        (5, "Spouse Relationship"): "Partner",
+        (5, "Spouse First Name"): None,
+        (5, "Spouse Last Name"): None,
+    })
+    out, _, report = transform(src, TEMPLATE.read_bytes())
+    _, rows = _rows(out)
+    assert rows[0]["ASSIGNMENT_CF!CF_NUMBER003"] == 158  # warned, not changed
+    assert any("outside expected range" in m for _, m in _warnings_for(report, "ASSIGNMENT_CF!CF_NUMBER003"))
+    assert any("looks like a code" in m for _, m in _warnings_for(report, "ASSIGNMENT_CF!CF_TEXT024"))
+    assert any("no first/last name" in m for _, m in _warnings_for(report, "SPOUSE_DOMESTIC_PARTNER"))
+
+
+def test_unmapped_resources_listed_once_per_value(result):
+    _, _, report = result
+    msgs = [(f, m) for _, f, m in report.warnings if "RESOURCE_MAP" in m]
+    assert msgs and len(msgs) == len(set(msgs))
+
+
+def test_allowed_dropdown_values_checked():
+    out, report_bytes, report = transform(SOURCE.read_bytes(), TEMPLATE.read_bytes(),
+                                          allowed_values={"EMPLOYEE!GENDER": ["Female"]})
+    assert any("not in Equus list" in m for _, m in _warnings_for(report, "EMPLOYEE!GENDER"))
+    ws = openpyxl.load_workbook(io.BytesIO(report_bytes))["Dropdown Values"]
+    allowed = {(ws.cell(r, 1).value, ws.cell(r, 2).value): ws.cell(r, 4).value for r in range(2, ws.max_row + 1)}
+    assert allowed[("EMPLOYEE!GENDER", "Male")] == "NO"
+    assert allowed[("EMPLOYEE!MARITAL_STATUS", "Married")] == "no list"

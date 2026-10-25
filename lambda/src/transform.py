@@ -4,10 +4,12 @@ EAFH import layout. Pure functions: bytes in, bytes out, no AWS calls."""
 from __future__ import annotations
 
 import io
+import json
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 import openpyxl
@@ -95,12 +97,27 @@ class Report:
     columns: list[SourceColumn] = field(default_factory=list)
     warnings: list[tuple[Any, str, str]] = field(default_factory=list)
     dropdown_values: Counter = field(default_factory=Counter)
+    unmapped_resources: Counter = field(default_factory=Counter)
+    allowed_values: dict[str, set[str]] = field(default_factory=dict)  # header -> lower-cased values
     coverage: Counter = field(default_factory=Counter)
     assignments: int = 0
     rows_written: int = 0
 
     def warn(self, row: Any, fld: str, msg: str) -> None:
         self.warnings.append((row, fld, msg))
+
+    def allowed(self, header: str, value: Any) -> str:
+        if header not in self.allowed_values:
+            return "no list"
+        return "yes" if str(value).lower() in self.allowed_values[header] else "NO"
+
+    def summarise_values(self) -> None:
+        """One warning per distinct unmapped resource / disallowed dropdown value."""
+        for (header, value), n in sorted(self.unmapped_resources.items(), key=str):
+            self.warn("all rows", header, f"{value!r} ({n}x) not in RESOURCE_MAP; Equus expects a username")
+        for (header, value), n in sorted(self.dropdown_values.items(), key=str):
+            if self.allowed(header, value) == "NO":
+                self.warn("all rows", header, f"{value!r} ({n}x) not in Equus list")
 
 
 # --------------------------------------------------------------------------- layout
@@ -284,13 +301,37 @@ def convert(header: str, value: Any, layout: TargetLayout, report: Report, row: 
     if "CF_TEXT" in header and not isinstance(value, str):
         value = str(value)
 
+    if header in cfg.NUMERIC_RANGES and isinstance(value, (int, float)):
+        low, high = cfg.NUMERIC_RANGES[header]
+        if not low <= value <= high:
+            report.warn(row, header, f"value {value} outside expected range {low}-{high}; kept, please verify")
+
     if header in cfg.VALUE_MAPS and isinstance(value, str):
         value = cfg.VALUE_MAPS[header].get(value.lower(), value)
     if layout.is_resource(header) and isinstance(value, str):
-        value = cfg.RESOURCE_MAP.get(value, value)
+        if value in cfg.RESOURCE_MAP:
+            value = cfg.RESOURCE_MAP[value]
+        else:
+            report.unmapped_resources[(header, value)] += 1
     if layout.is_dropdown(header) or layout.is_resource(header):
         report.dropdown_values[(header, value)] += 1
     return value
+
+
+def validate_record(main: dict, report: Report, row_ref: str) -> None:
+    """Cross-field checks on one assignment. Warns only; never changes values."""
+    for code_h, name_h in cfg.CODE_NAME_PAIRS:
+        code, name = main.get(code_h), main.get(name_h)
+        if isinstance(name, str) and (name == code or re.match(cfg.COST_CENTER_CODE_RE, name)):
+            report.warn(row_ref, name_h, f"name {name!r} looks like a code (code column holds {code!r})")
+    validate_family(main, cfg.FAMILY_PREFIXES[0], report, row_ref)
+
+
+def validate_family(rec: dict, prefix: str, report: Report, row_ref: str) -> None:
+    values = {k: v for k, v in rec.items() if k.split("!")[0] in (prefix, prefix + "_CF") and v is not None}
+    if values and not (values.get(prefix + "!FIRST_NAME") and values.get(prefix + "!LAST_NAME")):
+        report.warn(row_ref, prefix, f"record has {', '.join(sorted(k.split('!')[1] for k in values))} "
+                                     "but no first/last name; Equus may reject or create an unnamed person")
 
 
 # --------------------------------------------------------------------------- rows
@@ -348,6 +389,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             if any(main.get(k) is not None for k in ("ASSIGNMENT_FAMILY_SIZE!HOST_FAMILY_SIZE", "ASSIGNMENT_FAMILY_SIZE!HOME_FAMILY_SIZE")):
                 main["ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE"] = main.get("ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE") or start
         begin = start if cfg.DEFAULT_DATES_FROM_START else None
+        validate_record(main, report, row_ref)
 
         # Child records
         addr_recs = []
@@ -385,6 +427,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         for group in dependents:
             rec = {c.target: convert(c.target, raw[c.idx], layout, report, f"source {c.letter}{r}") for c in group}
             if any(v is not None for v in rec.values()):
+                validate_family(rec, cfg.FAMILY_PREFIXES[1], report, row_ref)
                 dep_recs.append(rec)
 
         # Equus layout: first row INSERTs the assignment; extra child records
@@ -465,9 +508,9 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
         ws.append([get_column_letter(idx), header, layout.rules.get(header), report.coverage.get(header, 0), ", ".join(sources.get(header, []))])
 
     ws = wb.create_sheet("Dropdown Values")
-    ws.append(["Equus Header", "Value Sent", "Occurrences"])
+    ws.append(["Equus Header", "Value Sent", "Occurrences", "Allowed?"])
     for (header, value), n in sorted(report.dropdown_values.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
-        ws.append([header, value, n])
+        ws.append([header, value, n, report.allowed(header, value)])
 
     ws = wb.create_sheet("Warnings")
     ws.append(["Where", "Field", "Message"])
@@ -479,12 +522,18 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     return buf.getvalue()
 
 
-def transform(source_bytes: bytes, template_bytes: bytes,
-              strict_pending: bool = False) -> tuple[bytes, bytes, Report]:
+def load_allowed_values() -> dict[str, list[str]] | None:
+    path = Path(__file__).parent / cfg.ALLOWED_VALUES_FILE
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool = False,
+              allowed_values: dict[str, list[str]] | None = None) -> tuple[bytes, bytes, Report]:
     """Return (equus_workbook_bytes, report_workbook_bytes, report).
 
     strict_pending: refuse to build the output while yellow (pending) columns
-    hold data."""
+    hold data.
+    allowed_values: Equus dropdown lists; defaults to ALLOWED_VALUES_FILE if bundled."""
     src_wb = openpyxl.load_workbook(io.BytesIO(source_bytes), data_only=True)
     if cfg.SOURCE_SHEET not in src_wb.sheetnames:
         raise ValueError(f"Source sheet {cfg.SOURCE_SHEET!r} not found; got {src_wb.sheetnames}")
@@ -494,6 +543,9 @@ def transform(source_bytes: bytes, template_bytes: bytes,
     layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
     report = Report()
+    if allowed_values is None:
+        allowed_values = load_allowed_values() or {}
+    report.allowed_values = {h: {str(v).lower() for v in vals} for h, vals in allowed_values.items()}
     check_template(layout, report)
     report.columns = build_column_plan(src_ws, layout)
     pending = [c for c in report.columns if "PENDING" in c.flags and c.has_data]
@@ -501,5 +553,6 @@ def transform(source_bytes: bytes, template_bytes: bytes,
         raise PendingFieldsError("Pending (yellow) columns hold data: " +
                                  ", ".join(f"{c.letter} {c.topia or c.ui}" for c in pending))
     rows = build_records(src_ws, report.columns, layout, report)
+    report.summarise_values()
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
     return out, build_report(report, layout), report
