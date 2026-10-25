@@ -3,6 +3,7 @@ EAFH import layout. Pure functions: bytes in, bytes out, no AWS calls."""
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -102,6 +103,10 @@ class Report:
     coverage: Counter = field(default_factory=Counter)
     assignments: int = 0
     rows_written: int = 0
+    data_rows: int = 0
+    source_sha256: str = ""
+    reconciliation: list[dict] = field(default_factory=list)
+    reconciliation_ok: bool = False
 
     def warn(self, row: Any, fld: str, msg: str) -> None:
         self.warnings.append((row, fld, msg))
@@ -479,6 +484,60 @@ def write_output(template_bytes: bytes, rows: list[dict], layout_ws_name: str, r
     return buf.getvalue()
 
 
+def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -> None:
+    """Compare every mapped source cell with the cell actually written to the
+    output workbook. Each difference must have a known reason; anything else
+    is counted as unexplained and fails the run."""
+    out_ws = openpyxl.load_workbook(io.BytesIO(output))[cfg.TARGET_SHEET]
+    out_headers = {out_ws.cell(cfg.TARGET_HEADER_ROW, c).value: c for c in range(1, out_ws.max_column + 1)}
+    command_col = out_headers[cfg.COL_ASSIGNMENT_COMMAND]
+    insert_rows = [r for r in range(cfg.TARGET_DATA_START_ROW, out_ws.max_row + 1)
+                   if out_ws.cell(r, command_col).value == "INSERT"]
+    source_rows = [r for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1)
+                   if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols)]
+    report.data_rows = len(source_rows)
+    counts_ok = len(source_rows) == len(insert_rows) == report.assignments
+
+    report.reconciliation = []
+    for col in (c for c in cols if c.status == "mapped"):
+        out_c = out_headers[col.target]
+        row = {"col": col.letter, "topia": col.topia or col.ui, "header": col.target, "source": 0, "written": 0,
+               "blank_token": 0, "failed_conversion": 0, "set_by_rule": 0, "unexplained": 0,
+               "source_date_total": 0, "written_date_total": 0}
+        is_date_col = False
+        for sr, orow in zip(source_rows, insert_rows):
+            raw, out = src_ws.cell(sr, col.idx).value, out_ws.cell(orow, out_c).value
+            present = raw is not None and str(raw).strip() != ""
+            row["source"] += present
+            row["written"] += out is not None
+            if present and out is None:
+                if is_blank(raw) or is_dirty_placeholder(raw):
+                    row["blank_token"] += 1
+                elif isinstance(raw, str) and to_date(raw) is None and col.target.endswith("DATE"):
+                    row["failed_conversion"] += 1
+                else:
+                    row["unexplained"] += 1
+            elif not present and out is not None:
+                row["set_by_rule" if col.target in cfg.RULE_TARGETS else "unexplained"] += 1
+            elif present and isinstance(out, (date, datetime)):
+                is_date_col = True
+                src_date, out_date = to_date(raw), out
+                row["source_date_total"] += _ordinal(src_date)
+                row["written_date_total"] += _ordinal(out_date)
+                if _ordinal(src_date) != _ordinal(out_date):
+                    row["unexplained"] += 1
+        if not is_date_col:
+            row["source_date_total"] = row["written_date_total"] = None
+        report.reconciliation.append(row)
+    report.reconciliation_ok = counts_ok and all(r["unexplained"] == 0 for r in report.reconciliation)
+
+
+def _ordinal(value: Any) -> int:
+    if isinstance(value, datetime):
+        value = value.date()
+    return value.toordinal() if isinstance(value, date) else 0
+
+
 def build_report(report: Report, layout: TargetLayout) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -512,6 +571,21 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     for (header, value), n in sorted(report.dropdown_values.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
         ws.append([header, value, n, report.allowed(header, value)])
 
+    ws = wb.create_sheet("Reconciliation")
+    ws.append(["Source Col", "Row 4 (Topia)", "Equus Header", "Source Non-blank", "Written", "Blank Token",
+               "Failed Conversion", "Set By Rule", "Unexplained", "Source Date Total", "Written Date Total"])
+    for r in report.reconciliation:
+        ws.append([r["col"], r["topia"], r["header"], r["source"], r["written"], r["blank_token"],
+                   r["failed_conversion"], r["set_by_rule"], r["unexplained"],
+                   r["source_date_total"], r["written_date_total"]])
+    ws.append([])
+    for label, value in [("Result", "OK" if report.reconciliation_ok else "FAILED"),
+                         ("Source data rows", report.data_rows),
+                         ("Assignments (INSERT rows)", report.assignments),
+                         ("Rows written", report.rows_written),
+                         ("Source SHA-256", report.source_sha256)]:
+        ws.append([label, value])
+
     ws = wb.create_sheet("Warnings")
     ws.append(["Where", "Field", "Message"])
     for w in report.warnings:
@@ -542,7 +616,7 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     tpl_wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
-    report = Report()
+    report = Report(source_sha256=hashlib.sha256(source_bytes).hexdigest())
     if allowed_values is None:
         allowed_values = load_allowed_values() or {}
     report.allowed_values = {h: {str(v).lower() for v in vals} for h, vals in allowed_values.items()}
@@ -555,4 +629,5 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     rows = build_records(src_ws, report.columns, layout, report)
     report.summarise_values()
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
+    reconcile(src_ws, report.columns, out, report)
     return out, build_report(report, layout), report

@@ -110,6 +110,14 @@ def lambda_handler(event, context):
         out_key = f"{dest_prefix}{stem}_EQUUS_{stamp}.xlsx"
         report_key = f"{dest_prefix}reports/{stem}_MAPPING_REPORT_{stamp}.xlsx"
         meta = {"source-bucket": bucket, "source-key": key[:1024]}
+        if not report.reconciliation_ok:
+            # Keep the evidence, withhold the import file, and fail the
+            # invocation so the event lands on the on-failure queue.
+            failed_key = f"{dest_prefix}reports/{stem}_RECONCILIATION_FAILED_{stamp}.xlsx"
+            s3_client().put_object(Bucket=dest_bucket, Key=failed_key, Body=report_bytes,
+                                   ContentType=XLSX_CONTENT_TYPE, Metadata=meta)
+            raise RuntimeError(f"Reconciliation failed for s3://{bucket}/{key}; "
+                               f"see s3://{dest_bucket}/{failed_key}")
         s3_client().put_object(Bucket=dest_bucket, Key=out_key, Body=output,
                                ContentType=XLSX_CONTENT_TYPE, Metadata=meta)
         s3_client().put_object(Bucket=dest_bucket, Key=report_key, Body=report_bytes,

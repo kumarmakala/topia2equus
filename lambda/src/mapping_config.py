@@ -131,6 +131,15 @@ COUNTRY_HEADERS = {
     "ASSIGNMENT_MAILING_ADDRESS!COUNTRY_CODE",
 }
 
+# Equus headers a business rule may fill when the mapped source cell is blank
+# (see transform.build_records). Reconciliation treats these as explained.
+RULE_TARGETS = {
+    "ASSIGNMENT!PHASE",
+    "ASSIGNMENT!INTERNATIONAL_RELO",
+    "ASSIGNMENT_COMPENSATION_SALARY!EFFECTIVE_DATE",
+    "ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE",
+}
+
 # Default effective/begin dates to the assignment start date when the source
 # has a value but no date of its own.
 DEFAULT_DATES_FROM_START = True

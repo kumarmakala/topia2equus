@@ -281,3 +281,49 @@ def test_allowed_dropdown_values_checked():
     allowed = {(ws.cell(r, 1).value, ws.cell(r, 2).value): ws.cell(r, 4).value for r in range(2, ws.max_row + 1)}
     assert allowed[("EMPLOYEE!GENDER", "Male")] == "NO"
     assert allowed[("EMPLOYEE!MARITAL_STATUS", "Married")] == "no list"
+
+
+# --------------------------------------------------------------------------- reconciliation
+
+def test_reconciliation_balances(result):
+    _, report_bytes, report = result
+    assert report.reconciliation_ok
+    assert report.data_rows == report.assignments == 2
+    assert len(report.source_sha256) == 64
+    ws = openpyxl.load_workbook(io.BytesIO(report_bytes))["Reconciliation"]
+    header = [c.value for c in ws[1]]
+    unexplained = header.index("Unexplained") + 1
+    assert all((ws.cell(r, unexplained).value or 0) == 0 for r in range(2, ws.max_row + 1)
+               if ws.cell(r, 1).value and ws.cell(r, 1).value.isalpha())
+
+
+def _drop_first_name(monkeypatch):
+    import transform as tmod
+    real = tmod.write_output
+
+    def lossy(*args, **kwargs):
+        data = real(*args, **kwargs)
+        wb = openpyxl.load_workbook(io.BytesIO(data))
+        ws = wb["Sheet1"]
+        col = [c for c in range(1, ws.max_column + 1) if ws.cell(3, c).value == "EMPLOYEE!FIRST_NAME"][0]
+        ws.cell(4, col).value = None
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+    monkeypatch.setattr(tmod, "write_output", lossy)
+
+
+def test_reconciliation_catches_silent_loss(monkeypatch):
+    _drop_first_name(monkeypatch)
+    _, _, report = transform(SOURCE.read_bytes(), TEMPLATE.read_bytes())
+    assert not report.reconciliation_ok
+    row = next(r for r in report.reconciliation if r["header"] == "EMPLOYEE!FIRST_NAME")
+    assert row["unexplained"] == 1
+
+
+def test_handler_raises_and_writes_report_only_on_reconciliation_failure(fake_s3, monkeypatch):
+    _drop_first_name(monkeypatch)
+    with pytest.raises(RuntimeError, match="Reconciliation failed"):
+        handler.lambda_handler(_event("src", "topia/incoming/FULL+HISTORICAL.xlsx"), None)
+    keys = [k for _, k in fake_s3.puts]
+    assert len(keys) == 1 and "RECONCILIATION_FAILED" in keys[0]
