@@ -11,6 +11,7 @@ Environment:
   DEST_PREFIX      optional  key prefix for outputs (default "equus/")
   SOURCE_PREFIX    optional  only process keys under this prefix (default "")
   SOURCE_SUFFIX    optional  only process keys ending with this (default ".xlsx")
+  STRICT_PENDING   optional  "true" = fail while yellow (pending) columns hold data
   TEMPLATE_S3_URI  optional  s3://bucket/key of the Equus template; defaults
                              to the template bundled with the function
 """
@@ -101,7 +102,8 @@ def lambda_handler(event, context):
             continue
 
         log.info("Migrating s3://%s/%s", bucket, key)
-        output, report_bytes, report = transform(_read(bucket, key), template)
+        strict = os.environ.get("STRICT_PENDING", "false").lower() == "true"
+        output, report_bytes, report = transform(_read(bucket, key), template, strict_pending=strict)
 
         stem = posixpath.splitext(posixpath.basename(key))[0]
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

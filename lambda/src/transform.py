@@ -46,15 +46,22 @@ def is_blank(value: Any) -> bool:
     return False
 
 
+class PendingFieldsError(ValueError):
+    """Raised in strict mode when yellow (pending) columns hold data."""
+
+
 @dataclass
 class SourceColumn:
     idx: int
     key: Any
     ui: Any
     topia: Any
-    status: str = "unmapped"  # mapped | address | contact | dependent | rule | ignored | unmapped | duplicate
+    status: str = "unmapped"  # mapped | address | contact | dependent | rule | ignored | excluded | unmapped | duplicate
     target: str | None = None
     note: str = ""
+    colour: str = "none"  # red | yellow | cyan | peach | none | unknown:<ARGB>
+    flags: list[str] = field(default_factory=list)  # PENDING | MISSING_TARGET | UNKNOWN_COLOUR
+    has_data: bool = False
 
     @property
     def letter(self) -> str:
@@ -112,6 +119,23 @@ def read_target_layout(ws) -> TargetLayout:
     return TargetLayout(headers, rules)
 
 
+def column_colour(ws, c: int) -> str:
+    """Business colour of a source column, from the fills of its header rows."""
+    found = []
+    for r in cfg.SOURCE_COLOUR_ROWS:
+        fill = ws.cell(r, c).fill
+        if fill is None or fill.fill_type is None or fill.fgColor.type != "rgb":
+            continue
+        found.append(fill.fgColor.rgb)
+    for argb, name in cfg.FILL_COLOURS.items():
+        if argb in found and name != "peach":
+            return name
+    unknown = [f for f in found if f not in cfg.FILL_COLOURS]
+    if unknown:
+        return f"unknown:{unknown[0]}"
+    return "peach" if found else "none"
+
+
 def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
     cols = []
     for c in range(cfg.SOURCE_FIRST_COL, ws.max_column + 1):
@@ -120,10 +144,18 @@ def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
             key=ws.cell(cfg.SOURCE_KEY_ROW, c).value,
             ui=ws.cell(cfg.SOURCE_UI_ROW, c).value,
             topia=ws.cell(cfg.SOURCE_TOPIA_ROW, c).value,
+            colour=column_colour(ws, c),
         )
         if col.key is None and col.ui is None and col.topia is None:
             continue
+        col.has_data = any(not is_blank(ws.cell(r, c).value)
+                           for r in range(cfg.SOURCE_DATA_START_ROW, ws.max_row + 1))
         cols.append(col)
+
+    # Red = not required: excluded before any other rule can claim the column.
+    for col in cols:
+        if col.colour == "red":
+            col.status, col.note = "excluded", "red: not required"
 
     claimed: dict[str, SourceColumn] = {}
 
@@ -140,6 +172,8 @@ def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
     # Pass 1: special roles and explicit overrides (these win over row 2).
     for col in cols:
         label = col.label
+        if col.status == "excluded":
+            continue
         if label in cfg.ADDRESS_COLUMNS:
             col.status, col.note = "address", f"LOCATION_TYPE = {cfg.ADDRESS_COLUMNS[label]}"
         elif label in cfg.CONTACT_COLUMNS:
@@ -170,6 +204,15 @@ def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
             claim(col, key, "row 2 = row 3" if key == str(col.key).strip().upper() else f"alias of {col.key}")
         else:
             col.note = f"{key} not in Equus template"
+
+    # Governance flags from the colour coding.
+    for col in cols:
+        if col.colour == "yellow" and col.status != "excluded":
+            col.flags.append("PENDING")
+        if col.colour == "cyan" and col.status == "unmapped":
+            col.flags.append("MISSING_TARGET")
+        if col.colour.startswith("unknown:"):
+            col.flags.append("UNKNOWN_COLOUR")
     return cols
 
 
@@ -376,10 +419,20 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Column Mapping"
-    ws.append(["Source Col", "Row 2 (Equus technical)", "Row 3 (Equus UI)", "Row 4 (Topia)", "Status", "Equus Header", "Equus Col", "Note"])
+    ws.append(["Source Col", "Colour", "Flags", "Row 2 (Equus technical)", "Row 3 (Equus UI)", "Row 4 (Topia)", "Status", "Equus Header", "Equus Col", "Note"])
     for c in report.columns:
         target_col = get_column_letter(layout.headers[c.target]) if c.target in layout.headers else None
-        ws.append([c.letter, c.key, c.ui, c.topia, c.status, c.target, target_col, c.note])
+        ws.append([c.letter, c.colour, ", ".join(c.flags), c.key, c.ui, c.topia, c.status, c.target, target_col, c.note])
+
+    ws = wb.create_sheet("Governance")
+    ws.append(["Source Col", "Row 4 (Topia)", "Colour", "Flag", "Has Data", "Status", "Equus Header"])
+    for c in report.columns:
+        for flag in c.flags:
+            ws.append([c.letter, c.topia, c.colour, flag, "yes" if c.has_data else "no", c.status, c.target])
+    ws.append([])
+    ws.append(["Colour", "Columns"])
+    for colour, n in sorted(Counter(c.colour for c in report.columns).items()):
+        ws.append([colour, n])
 
     ws = wb.create_sheet("Equus Coverage")
     ws.append(["Equus Col", "Equus Header", "Row 1 Rule", "Cells Populated", "Source Columns"])
@@ -405,8 +458,12 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     return buf.getvalue()
 
 
-def transform(source_bytes: bytes, template_bytes: bytes) -> tuple[bytes, bytes, Report]:
-    """Return (equus_workbook_bytes, report_workbook_bytes, report)."""
+def transform(source_bytes: bytes, template_bytes: bytes,
+              strict_pending: bool = False) -> tuple[bytes, bytes, Report]:
+    """Return (equus_workbook_bytes, report_workbook_bytes, report).
+
+    strict_pending: refuse to build the output while yellow (pending) columns
+    hold data."""
     src_wb = openpyxl.load_workbook(io.BytesIO(source_bytes), data_only=True)
     if cfg.SOURCE_SHEET not in src_wb.sheetnames:
         raise ValueError(f"Source sheet {cfg.SOURCE_SHEET!r} not found; got {src_wb.sheetnames}")
@@ -417,6 +474,10 @@ def transform(source_bytes: bytes, template_bytes: bytes) -> tuple[bytes, bytes,
 
     report = Report()
     report.columns = build_column_plan(src_ws, layout)
+    pending = [c for c in report.columns if "PENDING" in c.flags and c.has_data]
+    if strict_pending and pending:
+        raise PendingFieldsError("Pending (yellow) columns hold data: " +
+                                 ", ".join(f"{c.letter} {c.topia or c.ui}" for c in pending))
     rows = build_records(src_ws, report.columns, layout, report)
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
     return out, build_report(report, layout), report

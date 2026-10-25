@@ -77,7 +77,7 @@ def test_conversions_and_rules(result):
 def test_report_lists_unmapped_columns(result):
     _, report_bytes, report = result
     wb = openpyxl.load_workbook(io.BytesIO(report_bytes))
-    assert wb.sheetnames == ["Column Mapping", "Equus Coverage", "Dropdown Values", "Warnings"]
+    assert {"Column Mapping", "Equus Coverage", "Dropdown Values", "Warnings"} <= set(wb.sheetnames)
     unmapped = {c.topia for c in report.columns if c.status == "unmapped"}
     assert "Host Annualized Base Pay Amount" in unmapped  # OFFER_SALARY not in Equus file
 
@@ -177,3 +177,48 @@ def test_handler_skips_oversized_and_own_outputs(fake_s3, monkeypatch):
     monkeypatch.setenv("SOURCE_PREFIX", "")
     res = handler.lambda_handler(_event("dst", "equus/x_EQUUS_1.xlsx"), None)
     assert "own outputs" in res["results"][0]["skipped"]
+
+
+# --------------------------------------------------------------------------- governance
+
+def _edit_source(edits: dict) -> bytes:
+    """Copy of the fixture with {(row, topia_label): value} applied (row 2 = key row)."""
+    wb = openpyxl.load_workbook(SOURCE)
+    ws = wb["Full Historical Past Assignment"]
+    labels = {ws.cell(4, c).value: c for c in range(1, ws.max_column + 1)}
+    for (row, label), value in edits.items():
+        ws.cell(row, labels[label], value)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_red_column_excluded_even_with_valid_row2_key():
+    # Preferred Pronouns is red; give it a key that exists in the Equus template.
+    src = _edit_source({(2, "Preferred Pronouns"): "ASSIGNMENT_CF!CF_TEXT014"})
+    out, _, report = transform(src, TEMPLATE.read_bytes())
+    col = next(c for c in report.columns if c.topia == "Preferred Pronouns")
+    assert col.colour == "red" and col.status == "excluded"
+    _, rows = _rows(out)
+    assert rows[0]["ASSIGNMENT_CF!CF_TEXT014"] != "he/him/his"
+
+
+def test_governance_flags(result):
+    _, report_bytes, report = result
+    by_label = {c.topia: c for c in report.columns}
+    assert by_label["Assignment Start Date"].colour == "yellow"
+    assert "PENDING" in by_label["Assignment Start Date"].flags
+    assert "MISSING_TARGET" in by_label["Confidentiality Type"].flags
+    assert "MISSING_TARGET" in by_label["Expected Assignment Outcome"].flags
+    assert "UNKNOWN_COLOUR" in by_label["Spouse First Name"].flags
+    assert sum(c.colour == "red" for c in report.columns) == 74
+    assert all(c.status == "excluded" for c in report.columns if c.colour == "red")
+    wb = openpyxl.load_workbook(io.BytesIO(report_bytes))
+    assert "Governance" in wb.sheetnames
+    assert wb["Column Mapping"].cell(1, 2).value == "Colour"
+
+
+def test_strict_pending_refuses_output():
+    from transform import PendingFieldsError
+    with pytest.raises(PendingFieldsError):
+        transform(SOURCE.read_bytes(), TEMPLATE.read_bytes(), strict_pending=True)

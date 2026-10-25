@@ -16,6 +16,11 @@ Parameters:
   DestPrefix:
     Type: String
     Default: equus/
+  StrictPending:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: "true = refuse to write output while yellow (pending) source columns hold data"
   KmsKeyArn:
     Type: String
     Default: ""
@@ -47,6 +52,7 @@ Resources:
           DEST_PREFIX: !Ref DestPrefix
           SOURCE_PREFIX: !Ref SourcePrefix
           SOURCE_SUFFIX: .xlsx
+          STRICT_PENDING: !Ref StrictPending
       EventInvokeConfig:
         MaximumRetryAttempts: 1
         DestinationConfig:

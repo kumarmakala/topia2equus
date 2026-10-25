@@ -18,6 +18,18 @@ SOURCE_TOPIA_ROW = 4
 SOURCE_DATA_START_ROW = 5
 SOURCE_FIRST_COL = 2  # column A holds row labels / employee full name
 
+# Business colour coding of source header rows 1-4 (exact ARGB fills).
+# red = not required, yellow = pending clarification with the customer,
+# cyan = Equus custom field, peach = standard field. Precedence follows the
+# order below; any other fill is reported as unknown.
+SOURCE_COLOUR_ROWS = (1, 2, 3, 4)
+FILL_COLOURS = {
+    "FFFF0000": "red",
+    "FFFFFF00": "yellow",
+    "FF00FFFF": "cyan",
+    "FFFCE5CD": "peach",
+}
+
 TARGET_SHEET = "Sheet1"
 TARGET_RULE_ROW = 1
 TARGET_HEADER_ROW = 3
