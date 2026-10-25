@@ -137,6 +137,10 @@ DEFAULT_DATES_FROM_START = True
 
 # Source placeholders treated as empty.
 BLANK_TOKENS = {"not provided", "n/a", "na", "null", "-"}
+# Placeholders that also appear glued to other text (source N6 holds
+# "Not ProvidedHome"). Multi-word tokens only, so real names such as "Nancy"
+# are never blanked by a short token like "na".
+BLANK_PREFIX_TOKENS = ("not provided",)
 
 # Dropdown value translations, keyed by Equus header; lookups are
 # case-insensitive. Unlisted values pass through and are listed in the report.

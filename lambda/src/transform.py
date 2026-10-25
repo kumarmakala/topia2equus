@@ -245,11 +245,21 @@ def to_date(value: Any) -> date | None:
     return None
 
 
+def is_dirty_placeholder(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip().lower()
+    return any(text.startswith(t) and text != t for t in cfg.BLANK_PREFIX_TOKENS)
+
+
 def convert(header: str, value: Any, layout: TargetLayout, report: Report, row: Any) -> Any:
     if is_blank(value):
         return None
     if isinstance(value, str):
         value = value.strip()
+    if is_dirty_placeholder(value):
+        report.warn(row, header, f"placeholder with extra text {value!r}; left blank")
+        return None
 
     if layout.is_date(header):
         parsed = to_date(value)
@@ -315,10 +325,10 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         row_ref = f"source row {r}"
         main = {}
         for col in mapped:
-            main[col.target] = convert(col.target, raw[col.idx], layout, report, row_ref)
+            main[col.target] = convert(col.target, raw[col.idx], layout, report, f"source {col.letter}{r}")
 
         employee = main.get(cfg.COL_EMPLOYEE_NUMBER)
-        identifier = convert("ASSIGNMENT_CF!CF_TEXT029", raw[ident_col.idx], layout, report, row_ref) if ident_col else None
+        identifier = convert("ASSIGNMENT_CF!CF_TEXT029", raw[ident_col.idx], layout, report, f"source {ident_col.letter}{r}") if ident_col else None
         if identifier is None:
             identifier = employee
             report.warn(row_ref, cfg.COL_ASSIGNMENT_IDENTIFIER, "no Topia Assignment ID; using Employee Number")
@@ -373,7 +383,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
 
         dep_recs = []
         for group in dependents:
-            rec = {c.target: convert(c.target, raw[c.idx], layout, report, row_ref) for c in group}
+            rec = {c.target: convert(c.target, raw[c.idx], layout, report, f"source {c.letter}{r}") for c in group}
             if any(v is not None for v in rec.values()):
                 dep_recs.append(rec)
 

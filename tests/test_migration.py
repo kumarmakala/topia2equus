@@ -234,3 +234,12 @@ def test_country_of_birth_converted_despite_shifted_template_rules():
     template_warnings = {(f, m) for w, f, m in report.warnings if w == "template"}
     assert any(f == "EMPLOYEE!BIRTH_COUNTRY" for f, _ in template_warnings)
     assert any(f == "EMPLOYEE_CF!CF_TEXT016" for f, _ in template_warnings)
+
+
+def test_dirty_placeholder_blanked_with_cell_reference():
+    src = _edit_source({(5, "Nationality 3"): "Not ProvidedHome", (5, "First Name"): "Nancy"})
+    out, _, report = transform(src, TEMPLATE.read_bytes())
+    _, rows = _rows(out)
+    assert "EMPLOYEE_CF!CF_TEXT013" not in rows[0]
+    assert rows[0]["EMPLOYEE!FIRST_NAME"] == "Nancy"  # "na" token must not eat real names
+    assert any(w == "source N5" and "placeholder" in m for w, _, m in report.warnings)
