@@ -659,7 +659,9 @@ def test_handler_names_draft_and_records_readiness(fake_s3, caplog):
     assert {"Rules", "Readiness"} <= set(wb.sheetnames) and wb["Readiness"]["B1"].value == NOT_READY
     # A duplicate delivery is still skipped although the name is the draft one.
     again = handler.lambda_handler(EVENT, None)["results"][0]
-    assert again["skipped"] == "already processed" and len(fake_s3.puts) == 2
+    # UAT-07 (T-1392, Q5 audit trail): output + report + run manifest; the
+    # duplicate adds nothing.
+    assert again["skipped"] == "already processed" and len(fake_s3.puts) == 3
 
 
 def test_handler_uses_import_name_only_when_ready(fake_s3, monkeypatch):

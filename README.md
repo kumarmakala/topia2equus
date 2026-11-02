@@ -22,6 +22,10 @@ workbook, written to a destination S3 bucket together with a mapping report.
    - `equus/reports/<name>_MAPPING_REPORT_<etag>_<version>.xlsx` - column
      mapping, governance, Equus coverage, dropdown values sent,
      reconciliation, rules, readiness, warnings
+   - `equus/reports/<name>_RUN_<etag>_<version>.json` - run manifest (audit
+     trail, also written when the run fails); see **Run manifest** below
+6. Before any Equus import, the operator works through
+   [docs/uat/PRE_IMPORT_CHECKLIST.md](docs/uat/PRE_IMPORT_CHECKLIST.md).
 
 ## Layout
 
@@ -149,12 +153,45 @@ committed template has header rows only, and the test fixture uses fake data.
   change values.
 - **Reconciliation:** after writing, every mapped source cell is compared
   with the written workbook. Unexplained differences fail the run: only a
-  `RECONCILIATION_FAILED` report is written, and the event goes to the
-  failure queue.
+  `RECONCILIATION_FAILED` report and the run manifest are written (no import
+  file), and the event goes to the failure queue.
+- **Run manifest (UAT-07):** `equus/reports/<name>_RUN_<etag>_<version>.json`
+  records source bucket/key/ETag/SHA-256/size, template SHA-256 + version
+  (`bundled:<sha256[:12]>` or the S3 VersionId/ETag of `TEMPLATE_S3_URI`:
+  Equus has issued no template version, D2), business-rules version,
+  effective version, file SHA-256 and the rule set (id, Q, status,
+  `approved_for_import`, owner), reference lists, code version + code
+  SHA-256, `strict_pending`, readiness status and reasons, the output kind
+  (`IMPORT_CANDIDATE`, `DRAFT_NOT_IMPORT_READY` or `NONE`) with an explicit
+  import-ready statement, counts (source rows, accepted, held rows and held
+  detail, rows written, warnings, unmapped columns, exceptions by code),
+  timestamps and the failure (if any). The import file, report and manifest
+  carry S3 metadata `readiness`, `import-ready`, `business-rules-version`,
+  `business-rules-effective-version`, `code-version`, `template-sha256` and
+  `run-manifest`.
+- **Failure classification:** a failed run raises `MigrationError` whose
+  message starts with `[CODE]`, and the manifest's `failure.code` holds the
+  same code: `CONFIG` (`ConfigurationError` from `business_rules.json` /
+  `reference_data/`), `TEMPLATE` (template unreadable, sheet missing,
+  duplicated header, or a UAT-03 FILE-level header finding against the
+  approved template - `HEADER_MISMATCH` / `TEMPLATE_HASH_DIFFERS`, with the
+  `FILE_REJECTED` report kept - Q5: header issues fail the whole import),
+  `RECONCILIATION`, `PENDING` (`STRICT_PENDING=true` with yellow data),
+  `SOURCE` (unreadable source or no source sheet), `INTERNAL` (a FILE-level
+  `ROW_STRUCTURE_INVALID` engine defect, or anything else; an unexpected
+  error's message is withheld because it could quote data). No import file is
+  written for any failure. File and manifest metadata also carry `rows-held`
+  and `file-status`.
+- **Secure logging:** log lines carry S3 keys, counts, versions and codes only
+  - never cell values, names or e-mail addresses
+  (`tests/test_handler_audit.py::test_logs_contain_no_fixture_names_or_emails`).
+  Unexpected errors are logged as `file:line:function` frames without
+  messages.
 - **Idempotency:** output keys are `<name>_EQUUS[_DRAFT]_<source ETag>_<code
   version>.xlsx`; the code version hashes the code, `business_rules.json`,
   `reference_data/` and the template. A duplicate S3 delivery is skipped
-  (under either name); a mapping or approval change produces new keys.
+  (under either name) and writes nothing new; a mapping or approval change
+  produces new keys.
 
 ## Open mapping questions
 

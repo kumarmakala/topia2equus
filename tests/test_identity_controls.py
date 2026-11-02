@@ -406,7 +406,11 @@ def test_handler_withholds_import_on_file_level_failure(monkeypatch):
                           "s3": {"bucket": {"name": "src"}, "object": {"key": "topia/incoming/SYN.xlsx", "size": 1}}}]}
     with pytest.raises(RuntimeError, match="File-level validation failed"):
         handler.lambda_handler(event, None)
-    [(_, key)] = list(s3.puts)
+    # UAT-07 (T-1392, Q5 audit trail): a failed run also writes its run
+    # manifest; still no import file, and exactly one rejected-file report.
+    manifests = [k for (_, k) in s3.puts if k.endswith(".json")]
+    assert len(manifests) == 1 and "_RUN_" in manifests[0]
+    [(_, key)] = [bk for bk in s3.puts if bk[1] not in manifests]
     assert "FILE_REJECTED" in key and s3.puts[("dst", key)]["file-status"] == "FAILED"
 
 
