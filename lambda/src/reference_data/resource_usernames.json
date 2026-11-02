@@ -1,0 +1,13 @@
+{
+  "list_id": "resource_usernames",
+  "description": "Topia resource display name or e-mail -> Equus resource username. Placeholder: Jake (Q2) will provide the values with the other lookup fields. Empty or not approved = every resource value is an exception.",
+  "version": "0.0.0",
+  "effective_version": "0.0.0",
+  "generated_at": "2026-11-02",
+  "Q": "Q2",
+  "title": "Equus resource usernames",
+  "status": "pending_equus_configuration",
+  "approved_for_import": false,
+  "owner": "Jake (Equus)",
+  "values": {}
+}
