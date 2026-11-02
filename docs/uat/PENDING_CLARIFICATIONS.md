@@ -96,7 +96,7 @@ Every item is **Open**. A Jake answer is evidence, not approval. Until an item c
 
 | ID | Item | Owner | Needed |
 |---|---|---|---|
-| PC-ADM-01 | The column-J texts in the RTM are condensed transcriptions from `JAKE_Q1-Q43_EVIDENCE_ASSESSMENT.md`. The runner sandbox blocked reading `jake-1.xlsx` in this job. **UAT-08 update:** `J2:J44` and `I2:I44` were read with openpyxl and added verbatim in `docs/uat/RTM_Q1-Q43.md` §4. The row rule was confirmed from column A. The matrix rows keep their condensed text, and §4 is authoritative. | Next UAT task with workbook access, or the reviewer | Read `JAKE!J2:J44` and `I2:I44` with openpyxl; replace each "[condensed per ASSESS]" quote with the exact text; confirm the row rule Qn → row n+1 |
+| PC-ADM-01 | The column-J texts in the RTM are condensed transcriptions from `JAKE_Q1-Q43_EVIDENCE_ASSESSMENT.md`. The runner sandbox blocked reading `jake-1.xlsx` in this job. **UAT-08 update:** `J2:J44` and `I2:I44` were read with openpyxl and added verbatim in `docs/uat/RTM_Q1-Q43.md` §4. The row rule was confirmed from column A. The matrix rows keep their condensed text, and §4 is authoritative. **CLOSED 2026-11-02 (UAT-09, T-1394):** `J2:J44`, `I2:I44` and `A2:A44` re-read with openpyxl (workbook SHA-256 `30d0666c…1c09`). Every Q1–Q20 row of the RTM §1 matrix now quotes the exact `J{n+1}` text (typos kept; only line breaks collapsed); every Q21–Q43 row states `J{n+1}` is empty (None); every I cell reads `Open`; column A confirms Qn → row n+1. No "[condensed per ASSESS]" or "[verbatim per ASSESS]" marker remains. Checked by `tests/test_rtm_jake_quotes.py`. | Next UAT task with workbook access, or the reviewer | **Closed 2026-11-02.** Done: Read `JAKE!J2:J44` and `I2:I44` with openpyxl; replace each condensed quote with the exact text; confirm the row rule Qn → row n+1 |
 | PC-ADM-03 | **Added in UAT-08 (SEC-01):** the tracked root file `FULL HISTORICAL PAST ASSIGNMENT ALL FIELDS.xlsx` is byte-identical (SHA-256 `006ba3b5…ac18b8`) to the real extract, and `DATA MIGRATION SE EAFH TEST FILE.xlsx` is byte-identical to the Equus sample (`docs/uat/DEFECT_EXCEPTION_REGISTER.md` §2) | Repository owner + Pratyush (data storage) | Authorised removal from the index and the git history |
 | PC-ADM-02 | CR-R01: workbooks named like the real extract and sample, plus `local_s3` outputs, are tracked in git (commit `ade394f`) | Repository owner + Pratyush (data storage) | Check their contents. If they hold personal data, an authorised history clean-up |
 
@@ -107,4 +107,4 @@ Every item is **Open**. A Jake answer is evidence, not approval. Until an item c
   - Schneider business: 18.
   - Alka/Topia: 6.
 - Administrative items: 3. PC-ADM-03 was added in UAT-08.
-- All are Open. None is approved.
+- All are Open except PC-ADM-01 (closed 2026-11-02, UAT-09). None is approved.
