@@ -11,3 +11,7 @@ __pycache__/
 .venv/
 .DS_Store
 ~$*
+
+# Clarification evidence and synthetic fixtures are tracked
+!clarifications/*.xlsx
+!tests/fixtures/*.xlsx
