@@ -45,7 +45,8 @@ workbook, written to a destination S3 bucket together with a mapping report.
 
 ## Run locally
 
-Requires Python 3.9+ (3.12 recommended: it is the Lambda runtime) and git.
+Requires Python 3.9+ for local runs and git. SAM builds require Python 3.13,
+matching the Lambda runtime in `lambda/template.yaml`.
 
 1. Clone and set up a virtual environment:
 
