@@ -370,6 +370,11 @@ def test_handler_raises_and_writes_report_only_on_reconciliation_failure(fake_s3
     with pytest.raises(RuntimeError, match="Reconciliation failed"):
         handler.lambda_handler(_event("src", "topia/incoming/FULL+HISTORICAL.xlsx"), None)
     keys = [k for _, k in fake_s3.puts]
+    # UAT-07 (T-1392, Q5 audit trail): a failed run also writes its run
+    # manifest; still no import file, and exactly one failed-run report.
+    manifests = [k for k in keys if k.endswith(".json")]
+    assert len(manifests) == 1 and "_RUN_" in manifests[0]
+    keys = [k for k in keys if k not in manifests]
     assert len(keys) == 1 and "RECONCILIATION_FAILED" in keys[0]
 
 
@@ -381,7 +386,9 @@ def test_duplicate_event_is_skipped(fake_s3):
     second = handler.lambda_handler(event, None)["results"][0]
     assert "output" in first
     assert second["skipped"] == "already processed"
-    assert len(fake_s3.puts) == 2
+    # UAT-07 (T-1392, Q5 audit trail): output + report + run manifest; the
+    # duplicate adds nothing.
+    assert len(fake_s3.puts) == 3
 
 
 def test_output_key_changes_with_mapping_version(fake_s3, monkeypatch):
@@ -412,4 +419,5 @@ def test_duplicate_s3_delivery_with_moto(monkeypatch):
         handler.lambda_handler(event, None)
         handler.lambda_handler(event, None)
         keys = [o["Key"] for o in s3.list_objects_v2(Bucket="equus-dest-test")["Contents"]]
-        assert len(keys) == 2, keys
+        # UAT-07 (T-1392, Q5 audit trail): output + report + run manifest.
+        assert len(keys) == 3, keys

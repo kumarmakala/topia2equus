@@ -72,6 +72,17 @@ class PendingFieldsError(ValueError):
     """Raised in strict mode when yellow (pending) columns hold data."""
 
 
+class TemplateError(ValueError):
+    """The Equus template's sheet or header row does not match what the
+    engine writes. Q5 (Jake): header issues fail the whole import, so the run
+    stops instead of producing a file with a missing or doubled column."""
+
+
+class SourceError(ValueError):
+    """The source workbook does not have the expected structure."""
+
+
+
 @dataclass
 class SourceColumn:
     idx: int
@@ -258,10 +269,20 @@ def read_target_layout(ws) -> TargetLayout:
             continue
         header = norm_key(raw) or str(raw).strip()
         if header in headers:
-            raise ValueError(f"Duplicate Equus header {header!r} in template")
+            raise TemplateError(f"Duplicate Equus header {header!r} in template")
         headers[header] = c
         rules[header] = norm_label(ws.cell(cfg.TARGET_RULE_ROW, c).value)
     return TargetLayout(headers, rules)
+
+
+def check_template_structure(tpl_wb) -> TargetLayout:
+    """Target sheet present and header row unique; otherwise TemplateError
+    (whole-file failure, Q5). A renamed or missing header is not raised here:
+    check_template_headers (UAT-03) records it as a FILE-level HEADER_MISMATCH
+    against the approved template, which withholds the import workbook."""
+    if cfg.TARGET_SHEET not in tpl_wb.sheetnames:
+        raise TemplateError(f"Equus template has no sheet {cfg.TARGET_SHEET!r}; got {tpl_wb.sheetnames}")
+    return read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
 
 def column_colour(ws, c: int) -> str:
@@ -2018,13 +2039,19 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     rules = business_rules if isinstance(business_rules, cfg.BusinessRules) else cfg.load_business_rules(business_rules)
     refs = reference_data if isinstance(reference_data, dict) else cfg.load_reference_data(reference_data)
 
-    src_wb = openpyxl.load_workbook(io.BytesIO(source_bytes), data_only=True)
+    try:
+        src_wb = openpyxl.load_workbook(io.BytesIO(source_bytes), data_only=True)
+    except Exception as exc:  # zipfile.BadZipFile / openpyxl InvalidFileException
+        raise SourceError(f"source is not a readable .xlsx workbook ({type(exc).__name__})") from exc
     if cfg.SOURCE_SHEET not in src_wb.sheetnames:
-        raise ValueError(f"Source sheet {cfg.SOURCE_SHEET!r} not found; got {src_wb.sheetnames}")
+        raise SourceError(f"Source sheet {cfg.SOURCE_SHEET!r} not found; got {src_wb.sheetnames}")
     src_ws = src_wb[cfg.SOURCE_SHEET]
 
-    tpl_wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
-    layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
+    try:
+        tpl_wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
+    except Exception as exc:  # zipfile.BadZipFile / openpyxl InvalidFileException
+        raise TemplateError(f"Equus template is not a readable .xlsx workbook ({type(exc).__name__})") from exc
+    layout = check_template_structure(tpl_wb)
 
     report = Report(source_sha256=hashlib.sha256(source_bytes).hexdigest(), rules=rules, reference_data=refs)
     report.previously_accepted = {t for t in (identifier_text(v) for v in (previously_accepted or ())) if t}
