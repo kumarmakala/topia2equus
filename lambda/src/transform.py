@@ -4,7 +4,14 @@ EAFH import layout. Pure functions: bytes in, bytes out, no AWS calls.
 Business rules are read from the versioned configuration
 (mapping_config.load_business_rules / load_reference_data). A rule changes
 output only while its entry is approved_for_import; otherwise the affected
-rows are counted and reported in the Rules and Readiness sheets."""
+rows are counted and reported in the Rules and Readiness sheets.
+
+Identity, duplicate, header and row-structure controls (UAT-03: screen_rows,
+check_template_headers, validate_row_structure) never change a value: a row
+is accepted or HELD (excluded from the import workbook, listed in the
+Exceptions and Held Rows sheets), and a FILE-level finding withholds the whole
+import workbook. There is no fallback from a missing Assignment Identifier to
+the Employee Number (BR-01)."""
 
 from __future__ import annotations
 
@@ -133,8 +140,6 @@ class Report:
     provisional: Counter = field(default_factory=Counter)  # (header, source text, converted) -> n
     reference_values: Counter = field(default_factory=Counter)  # (list id, header, value) -> n
     config_issues: list[tuple[str, str]] = field(default_factory=list)  # (config path, message)
-    identifier_fallbacks: int = 0
-    missing_employee_numbers: int = 0
     current_row: Any = None
     readiness: Readiness | None = None
     # Spouse / dependent records (Q10, Q11, Q18, Q19, Q20).
@@ -143,10 +148,38 @@ class Report:
     dependent_exceptions: list[dict] = field(default_factory=list)  # code, sheet, rows, groups, q, owner, detail
     dependents_attached: int = 0  # child records attached from the keyed dependent source
     dependent_overlaps: int = 0  # assignments with dependents from the main sheet and the keyed source
+    # Identity, duplicate, header and row-level controls (UAT-03).
+    exceptions: list[dict] = field(default_factory=list)  # see EXCEPTIONS_HEADER
+    held_rows: dict = field(default_factory=dict)  # source row -> [codes]; excluded from the import workbook
+    held_row_values: dict = field(default_factory=dict)  # source row -> raw cell values (columns A..)
+    source_headers: list = field(default_factory=list)  # [(column letter, label)] for the Held Rows sheet
+    row_identity: dict = field(default_factory=dict)  # source row -> (identifier text, employee number)
+    accepted: list[dict] = field(default_factory=list)  # {"row", "identifier", "employee"} written to the import
+    previously_accepted: set = field(default_factory=set)  # identifiers accepted by an earlier run
+    template_check: dict = field(default_factory=dict)
 
     @property
     def business_rules_version(self) -> str:
         return self.rules.version if self.rules is not None else ""
+
+    @property
+    def file_failed(self) -> bool:
+        """True when any FILE-level finding withholds the whole import workbook."""
+        return any(e["level"] == cfg.LEVEL_FILE for e in self.exceptions)
+
+    def add_exception(self, code: str, message: str, source_row: Any = None, identifier: Any = None,
+                      employee: Any = None) -> dict:
+        """Record a finding with its configured level, Q and owner. Row-level
+        codes also hold `source_row` (kept out of the import workbook)."""
+        spec = self.rules.identity.code(code)
+        entry = {"source_row": source_row, "identifier": identifier, "employee": employee, "code": code,
+                 "level": spec.level, "message": message, "owner": spec.owner, "q": spec.q}
+        self.exceptions.append(entry)
+        if code in cfg.ROW_CODES and isinstance(source_row, int):
+            codes = self.held_rows.setdefault(source_row, [])
+            if code not in codes:
+                codes.append(code)
+        return entry
 
     def warn(self, row: Any, fld: str, msg: str) -> None:
         self.warnings.append((row, fld, msg))
@@ -545,6 +578,230 @@ def default_child_dates(rec: dict, start: Any, report: Report) -> None:
                 rec[header] = start
 
 
+# --------------------------------------------------------------------------- identity controls
+
+def identifier_text(value: Any) -> str | None:
+    """Assignment Identifier as text: leading zeros of a text cell are kept,
+    a numeric cell is rendered without '.0'. Blank / placeholder = None (never
+    replaced by another field, BR-01)."""
+    if is_blank(value):
+        return None
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, str):
+        return value.strip()
+    return str(value)
+
+
+def _canonical(value: Any) -> Any:
+    """Comparable form of a source cell for duplicate detection."""
+    if is_blank(value):
+        return None
+    if isinstance(value, str):
+        return ("s", value.strip())
+    if isinstance(value, bool):
+        return ("b", value)
+    if isinstance(value, (int, float)):
+        return ("n", int(value) if float(value).is_integer() else value)
+    if isinstance(value, (date, datetime)):
+        return ("d", value.isoformat())
+    return ("o", str(value))
+
+
+def _data_rows(src_ws, cols: list[SourceColumn]) -> list[int]:
+    return [r for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1)
+            if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols)]
+
+
+def screen_rows(src_ws, cols: list[SourceColumn], report: Report) -> None:
+    """Identity and duplicate controls over every source data row (BR-01,
+    BR-05, BR-17). Fills report.row_identity and holds rows through
+    report.add_exception; never changes a value.
+
+    * no Assignment Identifier            -> MISSING_ASSIGNMENT_ID (no fallback)
+    * no Employee Number                  -> MISSING_EMPLOYEE_NUMBER
+    * all compared cells equal an earlier row -> DUPLICATE_ROW (earlier row kept)
+    * one identifier, rows with different data -> CONFLICTING_IDENTIFIER (all rows)
+    * identifier accepted by an earlier run   -> ALREADY_ACCEPTED
+    The same Employee Number with different identifiers is valid (Q17)."""
+    ic = report.rules.identity
+    ident_col = next((c for c in cols if c.label == ic.assignment_identifier_label), None)
+    emp_col = next((c for c in cols if c.status == "mapped" and c.target == cfg.COL_EMPLOYEE_NUMBER), None)
+    compare = [c for c in cols if c.status in ic.duplicate_compare_statuses]
+    if ident_col is not None and ident_col not in compare:
+        compare.append(ident_col)
+    if emp_col is not None and emp_col not in compare:
+        compare.append(emp_col)
+
+    max_col = src_ws.max_column
+    report.source_headers = []
+    for c in range(1, max_col + 1):
+        label = next((v for v in (src_ws.cell(r, c).value for r in (cfg.SOURCE_TOPIA_ROW, cfg.SOURCE_UI_ROW,
+                                                                     cfg.SOURCE_KEY_ROW)) if v is not None), None)
+        report.source_headers.append((get_column_letter(c), label))
+
+    rows = _data_rows(src_ws, cols)
+    signatures: dict[int, tuple] = {}
+    first_seen: dict[tuple, int] = {}
+    by_identifier: dict[str, list[int]] = defaultdict(list)
+    for r in rows:
+        identifier = identifier_text(src_ws.cell(r, ident_col.idx).value) if ident_col else None
+        employee = identifier_text(src_ws.cell(r, emp_col.idx).value) if emp_col else None
+        report.row_identity[r] = (identifier, employee)
+        sig = tuple(_canonical(src_ws.cell(r, c.idx).value) for c in compare)
+        signatures[r] = sig
+        where = f"source {ident_col.letter}{r}" if ident_col else f"source row {r}"
+        if identifier is None:
+            report.add_exception(cfg.EXC_MISSING_ASSIGNMENT_ID,
+                                 f"{where}: no Assignment Identifier (Topia "
+                                 f"'{ic.assignment_identifier_label}'); row held, the Employee Number is not "
+                                 "used as identifier (BR-01, D1)", r, identifier, employee)
+        else:
+            by_identifier[identifier].append(r)
+        if employee is None:
+            report.add_exception(cfg.EXC_MISSING_EMPLOYEE_NUMBER,
+                                 f"source row {r}: no Employee Number (Talent Link ID); row held", r, identifier,
+                                 employee)
+        if sig in first_seen:
+            report.add_exception(cfg.EXC_DUPLICATE_ROW,
+                                 f"source row {r}: every compared cell equals source row {first_seen[sig]} "
+                                 f"({len(compare)} columns); row {first_seen[sig]} is kept, this row is held",
+                                 r, identifier, employee)
+        else:
+            first_seen[sig] = r
+
+    for identifier, group in by_identifier.items():
+        if len({signatures[r] for r in group}) < 2:
+            continue
+        differing = [c.letter for i, c in enumerate(compare) if len({signatures[r][i] for r in group}) > 1]
+        for r in group:
+            others = ", ".join(str(o) for o in group if o != r)
+            report.add_exception(cfg.EXC_CONFLICTING_IDENTIFIER,
+                                 f"source row {r}: Assignment Identifier also on source row(s) {others} with "
+                                 f"different data in column(s) {', '.join(differing)}; all rows held",
+                                 r, identifier, report.row_identity[r][1])
+
+    for r in rows:
+        identifier, employee = report.row_identity[r]
+        if identifier is not None and identifier in report.previously_accepted and r not in report.held_rows:
+            report.add_exception(cfg.EXC_ALREADY_ACCEPTED,
+                                 f"source row {r}: identifier was accepted by an earlier run; not imported again",
+                                 r, identifier, employee)
+
+    for r in report.held_rows:
+        report.held_row_values[r] = [src_ws.cell(r, c).value for c in range(1, max_col + 1)]
+
+
+def validate_row_structure(rows: list[dict], report: Report) -> None:
+    """Generated rows must follow Jake's example (' Mny dependents Ex', Q17-Q19):
+    the first row of an assignment is Employee command INSERT (first assignment
+    of the employee in the file) or IGNORE, Assignment Command INSERT,
+    Assignment Number NEW; further rows are IGNORE / UPDATE with blank Employee
+    and Assignment Number and the same Assignment Identifier. A violation is an
+    engine defect and withholds the whole file."""
+    problems: list[str] = []
+    current = None
+    seen_employees: set = set()
+    identifiers: set = set()
+    for i, row in enumerate(rows):
+        out_row = cfg.TARGET_DATA_START_ROW + i
+        command = row.get(cfg.COL_ASSIGNMENT_COMMAND)
+        ident = row.get(cfg.COL_ASSIGNMENT_IDENTIFIER)
+        if ident is None or (isinstance(ident, str) and not ident.strip()):
+            problems.append(f"output row {out_row}: no Assignment Identifier")
+        if command == "INSERT":
+            employee = row.get(cfg.COL_EMPLOYEE_NUMBER)
+            expected = cfg.EMPLOYEE_ACTION_REPEAT if employee in seen_employees else cfg.EMPLOYEE_ACTION_FIRST
+            if employee is None:
+                problems.append(f"output row {out_row}: INSERT row without Employee Number")
+            if row.get(cfg.COL_EMPLOYEE_ACTION) != expected:
+                problems.append(f"output row {out_row}: Employee command {row.get(cfg.COL_EMPLOYEE_ACTION)!r}, "
+                                f"expected {expected!r}")
+            if row.get(cfg.COL_ASSIGNMENT_NUMBER) != cfg.NEW_ASSIGNMENT_NUMBER:
+                problems.append(f"output row {out_row}: Assignment Number is not {cfg.NEW_ASSIGNMENT_NUMBER!r}")
+            if ident in identifiers:
+                problems.append(f"output row {out_row}: Assignment Identifier INSERTed twice")
+            identifiers.add(ident)
+            seen_employees.add(employee)
+            current = ident
+        elif command == "UPDATE":
+            if current is None:
+                problems.append(f"output row {out_row}: UPDATE row before any INSERT row")
+            elif ident != current:
+                problems.append(f"output row {out_row}: UPDATE row carries a different Assignment Identifier "
+                                "than its INSERT row (cross-assignment linkage, Q18)")
+            if row.get(cfg.COL_EMPLOYEE_ACTION) != cfg.EMPLOYEE_ACTION_REPEAT:
+                problems.append(f"output row {out_row}: UPDATE row Employee command is not "
+                                f"{cfg.EMPLOYEE_ACTION_REPEAT!r}")
+            for header in (cfg.COL_EMPLOYEE_NUMBER, cfg.COL_ASSIGNMENT_NUMBER):
+                if row.get(header) is not None:
+                    problems.append(f"output row {out_row}: UPDATE row has {header} (must be blank)")
+        else:
+            problems.append(f"output row {out_row}: Assignment Command {command!r} is neither INSERT nor UPDATE")
+    for problem in problems:
+        report.add_exception(cfg.EXC_ROW_STRUCTURE_INVALID, problem, "output")
+
+
+def _header_value(value: Any) -> Any:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return value
+
+
+def check_template_headers(output: bytes, template_bytes: bytes, report: Report) -> None:
+    """Compare header rows of the output workbook with the approved (bundled)
+    template version; record template version and SHA-256 (BR-05, Q5: header
+    issues fail the whole import). Pending header decisions (D2) are reported,
+    the header itself is never changed here."""
+    ic = report.rules.identity
+    approved_bytes = ic.template_file.read_bytes()
+    approved_ws = openpyxl.load_workbook(io.BytesIO(approved_bytes))[cfg.TARGET_SHEET]
+    out_ws = openpyxl.load_workbook(io.BytesIO(output))[cfg.TARGET_SHEET]
+    supplied_sha = hashlib.sha256(template_bytes).hexdigest()
+    diffs = []
+    for r in ic.header_rows:
+        for c in range(1, max(approved_ws.max_column, out_ws.max_column) + 1):
+            a, o = _header_value(approved_ws.cell(r, c).value), _header_value(out_ws.cell(r, c).value)
+            if a != o:
+                diffs.append({"cell": f"{get_column_letter(c)}{r}", "column": get_column_letter(c),
+                              "approved": a, "found": o})
+    report.template_check = {
+        "template_version": ic.template_version, "approved_sha256": ic.template_sha256,
+        "supplied_sha256": supplied_sha, "header_rows": ic.header_rows, "diffs": diffs,
+        "decisions": [], "result": "FAILED" if diffs else "OK",
+    }
+    if diffs:
+        columns = sorted({d["column"] for d in diffs}, key=lambda s: (len(s), s))
+        detail = "; ".join(f"{d['cell']} approved {d['approved']!r}, found {d['found']!r}" for d in diffs[:20])
+        more = f" (+{len(diffs) - 20} more)" if len(diffs) > 20 else ""
+        report.add_exception(cfg.EXC_HEADER_MISMATCH,
+                             f"{len(diffs)} header cell(s) differ from approved template {ic.template_version} in "
+                             f"column(s) {', '.join(columns)}: {detail}{more}; import workbook withheld",
+                             "template")
+    elif supplied_sha != ic.template_sha256:
+        report.add_exception(cfg.EXC_TEMPLATE_HASH_DIFFERS,
+                             f"supplied template SHA-256 {supplied_sha} differs from approved "
+                             f"{ic.template_version} ({ic.template_sha256}); header rows are identical",
+                             "template")
+    for d in ic.pending_header_decisions:
+        approved_value = _header_value(approved_ws[d["cell"]].value)
+        output_value = _header_value(out_ws[d["cell"]].value)
+        report.template_check["decisions"].append({**d, "template_value": approved_value,
+                                                   "output_value": output_value})
+        if approved_value != d["approved_value"]:
+            msg = (f"pending header decision {d['id']}: {d['cell']} of the approved template is "
+                   f"{approved_value!r}, configuration expects {d['approved_value']!r}")
+            report.config_issues.append((f"identity_controls.pending_header_decisions.{d['id']}", msg))
+            report.warn("configuration", d["cell"], msg)
+        report.add_exception(cfg.EXC_HEADER_DECISION_PENDING,
+                             f"{d['id']}: header {d['cell']} is {approved_value!r} in the approved template "
+                             f"{ic.template_version}, {d['alternative_value']!r} in {d['alternative_source']}; "
+                             f"output keeps {output_value!r} until Jake decides (Q5: a header issue fails the "
+                             "whole import)", "template")
+
+
 # --------------------------------------------------------------------------- rows
 
 def _group_dependents(cols: list[SourceColumn]) -> list[list[SourceColumn]]:
@@ -683,24 +940,31 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
     dependents = _group_dependents(cols)
     cancel_col = next((c for c in cols if c.rule == cfg.RULE_CANCELLATION_PHASE), None)
     override_cols = [c for c in cols if c.rule in cfg.COLUMN_OVERRIDE_RULES]
-    ident_col = next((c for c in cols if c.label == cfg.ASSIGNMENT_IDENTIFIER_LABEL), None)
     start_header = report.rules.params(cfg.RULE_DEFAULT_DATES)["start_header"]
+
+    # Identity and duplicate controls first: held rows never reach the import
+    # workbook, and the Employee command INSERT goes to the first *accepted*
+    # assignment of an employee.
+    screen_rows(src_ws, cols, report)
 
     out_rows: list[dict] = []
     seen_employees: set = set()
     keyed_dependents = keyed_dependents or {}
-    # Assignment IDs that occur on more than one assignment row cannot take
-    # keyed dependents unambiguously (Q1/Q18).
-    id_counts: Counter = Counter()
-    if ident_col is not None and keyed_dependents:
-        for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1):
-            if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols):
-                id_counts[_key_text(src_ws.cell(r, ident_col.idx).value)] += 1
+    # Assignment IDs that occur on more than one source assignment row (held
+    # or not) cannot take keyed dependents unambiguously (Q1/Q18).
+    id_counts: Counter = Counter(ident for ident, _ in report.row_identity.values()
+                                 if ident is not None) if keyed_dependents else Counter()
     consumed: set = set()
 
     for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1):
         raw = {c.idx: src_ws.cell(r, c.idx).value for c in cols}
         if all(is_blank(v) for v in raw.values()):
+            continue
+        if r in report.held_rows:
+            # Listed in Exceptions and Held Rows; never imported. Keyed
+            # dependents of a held assignment are held with it, never
+            # attached elsewhere.
+            _hold_keyed_dependents_of_held_row(r, keyed_dependents, id_counts, consumed, report)
             continue
         report.current_row = r
         row_ref = f"source row {r}"
@@ -709,17 +973,12 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             main[col.target] = convert(col.target, raw[col.idx], layout, report, f"source {col.letter}{r}")
 
         employee = main.get(cfg.COL_EMPLOYEE_NUMBER)
-        identifier = convert("ASSIGNMENT_CF!CF_TEXT029", raw[ident_col.idx], layout, report, f"source {ident_col.letter}{r}") if ident_col else None
-        # Keyed dependents join only on this row's own Assignment ID, never on
-        # the Employee Number fallback below.
-        join_key = _key_text(identifier)
-        if identifier is None:
-            identifier = employee
-            report.identifier_fallbacks += 1
-            report.warn(row_ref, cfg.COL_ASSIGNMENT_IDENTIFIER, "no Topia Assignment ID; using Employee Number")
-        if employee is None:
-            report.missing_employee_numbers += 1
-            report.warn(row_ref, cfg.COL_EMPLOYEE_NUMBER, "missing Employee Number (Talent Link ID)")
+        # Text, leading zeros kept; screen_rows held every row without one, so
+        # there is no fallback to the Employee Number (BR-01). Keyed
+        # dependents join on this row's own Assignment ID only.
+        identifier = report.row_identity[r][0]
+        join_key = identifier
+        report.accepted.append({"row": r, "identifier": identifier, "employee": report.row_identity[r][1]})
 
         # Business rules (configuration-gated)
         apply_assignment_rules(main, raw[cancel_col.idx] if cancel_col else None, report)
@@ -800,6 +1059,25 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
     return out_rows
 
 
+def _hold_keyed_dependents_of_held_row(r: int, keyed: dict[str, list[dict]], id_counts: Counter, consumed: set,
+                                       report: Report) -> None:
+    """Keyed dependents whose Assignment ID belongs to a held source row are
+    held with it (UAT-03): never attached, reported once per identifier."""
+    join_key = report.row_identity.get(r, (None, None))[0]
+    if join_key is None or join_key not in keyed or join_key in consumed:
+        return
+    consumed.add(join_key)
+    entries = keyed[join_key]
+    sheet = report.rules.dependent_source.sheet
+    rows, groups = [f"row {e['row']}" for e in entries], sum(len(e["records"]) for e in entries)
+    if id_counts[join_key] > 1:
+        report.hold_dependents("HELD_DEPENDENTS_AMBIGUOUS", sheet, rows, groups,
+                               f"Assignment ID on {id_counts[join_key]} assignment rows")
+    else:
+        report.hold_dependents("HELD_DEPENDENTS_ASSIGNMENT_HELD", sheet, rows, groups,
+                               f"assignment source row {r} held ({', '.join(report.held_rows[r])})")
+
+
 def _attach_keyed_dependents(join_key: str | None, employee: Any, keyed: dict[str, list[dict]], id_counts: Counter,
                              consumed: set, has_sheet_dependents: bool, report: Report, row_ref: str) -> list[dict]:
     """Dependent records of the keyed source for one assignment row, joined
@@ -845,6 +1123,8 @@ def write_output(template_bytes: bytes, rows: list[dict], layout_ws_name: str, r
     wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     ws = wb[layout_ws_name]
     layout = read_target_layout(ws)
+    identity = getattr(report.rules, "identity", None)
+    text_headers = set(identity.identifier_headers) if identity is not None else set()
     if ws.max_row >= cfg.TARGET_DATA_START_ROW:
         ws.delete_rows(cfg.TARGET_DATA_START_ROW, ws.max_row - cfg.TARGET_DATA_START_ROW + 1)
     for offset, row in enumerate(rows):
@@ -859,6 +1139,8 @@ def write_output(template_bytes: bytes, rows: list[dict], layout_ws_name: str, r
             cell = ws.cell(r, c, value)
             if isinstance(value, (date, datetime)):
                 cell.number_format = DATE_FORMAT
+            elif header in text_headers and isinstance(value, str):
+                cell.number_format = "@"  # identifiers stay text (leading zeros)
             report.coverage[header] += 1
     report.rows_written = len(rows)
     buf = io.BytesIO()
@@ -872,18 +1154,27 @@ def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -
     is counted as unexplained and fails the run."""
     out_ws = openpyxl.load_workbook(io.BytesIO(output))[cfg.TARGET_SHEET]
     out_headers = {out_ws.cell(cfg.TARGET_HEADER_ROW, c).value: c for c in range(1, out_ws.max_column + 1)}
-    command_col = out_headers[cfg.COL_ASSIGNMENT_COMMAND]
+    all_rows = _data_rows(src_ws, cols)
+    report.data_rows = len(all_rows)
+    report.reconciliation = []
+    command_col = out_headers.get(cfg.COL_ASSIGNMENT_COMMAND)
+    if command_col is None:  # header mismatch: nothing can be reconciled
+        report.reconciliation_ok = False
+        return
     insert_rows = [r for r in range(cfg.TARGET_DATA_START_ROW, out_ws.max_row + 1)
                    if out_ws.cell(r, command_col).value == "INSERT"]
-    source_rows = [r for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1)
-                   if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols)]
-    report.data_rows = len(source_rows)
-    counts_ok = len(source_rows) == len(insert_rows) == report.assignments
+    # Held rows are accounted for in Exceptions / Held Rows, not in the import:
+    # every source row is either accepted (one INSERT row) or held.
+    source_rows = [r for r in all_rows if r not in report.held_rows]
+    counts_ok = (len(source_rows) == len(insert_rows) == report.assignments
+                 and report.data_rows == report.assignments + len(report.held_rows))
     rule_targets = report.rules.applied_targets()
 
-    report.reconciliation = []
     for col in (c for c in cols if c.status == "mapped"):
-        out_c = out_headers[col.target]
+        out_c = out_headers.get(col.target)
+        if out_c is None:
+            counts_ok = False
+            continue
         row = {"col": col.letter, "topia": col.topia or col.ui, "header": col.target, "source": 0, "written": 0,
                "blank_token": 0, "failed_conversion": 0, "set_by_rule": 0, "unexplained": 0,
                "source_date_total": 0, "written_date_total": 0}
@@ -1000,13 +1291,27 @@ def compute_readiness(report: Report) -> Readiness:
             if bad:
                 add("dropdown_value_not_allowed", header, q, owner, f"{len(bad)} distinct value(s) not in the Equus list")
 
-    q, owner = cfg.READINESS_ITEMS["identifier"]
-    if report.identifier_fallbacks:
-        add("identifier", cfg.COL_ASSIGNMENT_IDENTIFIER, q, owner,
-            f"{report.identifier_fallbacks} row(s) without a Topia Assignment ID used the Employee Number")
-    if report.missing_employee_numbers:
-        add("identifier", cfg.COL_EMPLOYEE_NUMBER, q, owner,
-            f"{report.missing_employee_numbers} row(s) without an Employee Number")
+    # Identity / duplicate / header / structure findings (UAT-03). Any held
+    # row or FILE finding makes the run NOT_READY.
+    row_counts: Counter = Counter()
+    row_specs: dict = {}
+    for e in report.exceptions:
+        if e["code"] == cfg.EXC_VALIDATION_WARNING:
+            continue  # value-level warnings; listed in Exceptions / Warnings
+        if e["code"] in cfg.ROW_CODES:
+            row_counts[e["code"]] += 1
+            row_specs[e["code"]] = e
+        elif e["level"] == cfg.LEVEL_FILE:
+            add("file_rejected", e["code"], e["q"], e["owner"], f"{e['message']} (FILE level)")
+        elif e["code"] == cfg.EXC_HEADER_DECISION_PENDING:
+            add("pending_header_decision", e["code"], e["q"], e["owner"], e["message"])
+        else:
+            add("template_version", e["code"], e["q"], e["owner"], e["message"])
+    for code, n in row_counts.items():
+        e = row_specs[code]
+        add("row_held" if e["level"] == cfg.LEVEL_ROW_HELD else "file_rejected", code, e["q"], e["owner"],
+            f"{n} source row(s) {code}; held out of the import workbook (level {e['level']}), "
+            "see Exceptions and Held Rows")
 
     for e in report.dependent_exceptions:
         add("held_dependents", e["code"], e["q"], e["owner"],
@@ -1082,6 +1387,7 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     for label, value in [("Result", "OK" if report.reconciliation_ok else "FAILED"),
                          ("Source data rows", report.data_rows),
                          ("Assignments (INSERT rows)", report.assignments),
+                         ("Held source rows", len(report.held_rows)),
                          ("Rows written", report.rows_written),
                          ("Source SHA-256", report.source_sha256)]:
         ws.append([label, value])
@@ -1089,6 +1395,10 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     _rules_sheet(wb.create_sheet("Rules"), report)
     _family_sheet(wb.create_sheet("Family"), report)
     _readiness_sheet(wb.create_sheet("Readiness"), report)
+    _exceptions_sheet(wb.create_sheet("Exceptions"), report)
+    _held_rows_sheet(wb.create_sheet("Held Rows"), report)
+    _accepted_sheet(wb.create_sheet(ACCEPTED_SHEET), report)
+    _template_sheet(wb.create_sheet("Template Check"), report)
 
     ws = wb.create_sheet("Warnings")
     ws.append(["Where", "Field", "Message"])
@@ -1102,6 +1412,73 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
 
 RULES_HEADER = ["Rule ID", "Q", "Title", "Status", "Owner", "Approved For Import", "Applied?", "Rows Affected", "Notes"]
 READINESS_HEADER = ["Category", "Item", "Q", "Owner", "Detail"]
+EXCEPTIONS_HEADER = ["Source Row", "Assignment Identifier", "Employee Number", "Code", "Level", "Message", "Owner",
+                     "Q"]
+ACCEPTED_SHEET = "Accepted Identifiers"
+ACCEPTED_HEADER = ["Source Row", "Assignment Identifier", "Employee Number"]
+
+
+def _exceptions_sheet(ws, report: Report) -> None:
+    ws.append(EXCEPTIONS_HEADER)
+    for e in report.exceptions:
+        ws.append([e["source_row"], e["identifier"], e["employee"], e["code"], e["level"], e["message"],
+                   e["owner"], e["q"]])
+
+
+def _held_rows_sheet(ws, report: Report) -> None:
+    """Source data of every held row, in source column order, so a corrected
+    batch can be built from it (docs/uat/REPROCESSING_PROCEDURE.md)."""
+    ws.append(["Source Row", "Codes"] + [letter for letter, _ in report.source_headers])
+    ws.append(["(source column)", "(row 4 / 3 / 2 label)"] + [label for _, label in report.source_headers])
+    for r in sorted(report.held_rows):
+        cells = list(report.held_row_values.get(r, []))  # raw values, unchanged
+        ws.append([r, ", ".join(report.held_rows[r])] + cells)
+        for value, cell in zip(cells, ws[ws.max_row][2:]):
+            if isinstance(value, str):
+                cell.number_format = "@"
+            elif isinstance(value, (date, datetime)):
+                cell.number_format = DATE_FORMAT
+
+
+def _accepted_sheet(ws, report: Report) -> None:
+    ws.append(ACCEPTED_HEADER)
+    for a in report.accepted:
+        cell_row = [a["row"], a["identifier"], a["employee"]]
+        ws.append(cell_row)
+        ws.cell(ws.max_row, 2).number_format = "@"
+
+
+def _template_sheet(ws, report: Report) -> None:
+    tc = report.template_check
+    for label, value in [("Template version", tc.get("template_version")),
+                         ("Approved template SHA-256", tc.get("approved_sha256")),
+                         ("Supplied template SHA-256", tc.get("supplied_sha256")),
+                         ("Header rows compared", ", ".join(str(r) for r in tc.get("header_rows", ()))),
+                         ("Result", tc.get("result")),
+                         ("File status", "FAILED - import workbook withheld" if report.file_failed else "ACCEPTED")]:
+        ws.append([label, value])
+    ws.append([])
+    ws.append(["Differing Cell", "Approved", "Found"])
+    for d in tc.get("diffs", []):
+        ws.append([d["cell"], d["approved"], d["found"]])
+    ws.append([])
+    ws.append(["Pending Header Decision", "Cell", "Approved Template", "Output", "Alternative", "Alternative Source",
+               "Status"])
+    for d in tc.get("decisions", []):
+        ws.append([d["id"], d["cell"], d["template_value"], d["output_value"], d["alternative_value"],
+                   d["alternative_source"], "PENDING (owner Jake, Q5) - header not changed"])
+
+
+def accepted_identifiers(report_bytes: bytes) -> set[str]:
+    """Identifiers accepted by an earlier run, read from its report workbook
+    (sheet 'Accepted Identifiers'); pass them as `previously_accepted` to
+    transform() for a controlled re-run (docs/uat/REPROCESSING_PROCEDURE.md)."""
+    ws = openpyxl.load_workbook(io.BytesIO(report_bytes), read_only=True)[ACCEPTED_SHEET]
+    rows = ws.iter_rows(min_row=1, values_only=True)
+    header = next(rows, None)
+    if header is None or list(header[:len(ACCEPTED_HEADER)]) != ACCEPTED_HEADER:
+        raise ValueError(f"sheet {ACCEPTED_SHEET!r} does not have the expected header {ACCEPTED_HEADER}")
+    return {identifier_text(r[1]) for r in rows if r and identifier_text(r[1]) is not None}
 
 
 def rule_applied(report: Report, rule: cfg.BusinessRule) -> str:
@@ -1168,11 +1545,17 @@ def _family_sheet(ws, report: Report) -> None:
 
 def _readiness_sheet(ws, report: Report) -> None:
     readiness = report.readiness
+    tc = report.template_check
     for label, value in [("Status", readiness.status),
                          ("Business rules version", report.business_rules_version),
                          ("Reasons", len(readiness.reasons)),
                          ("Equus UAT execution", "INCOMPLETE - not executed from this environment; the best "
-                                                 f"status this tool can compute is {READY}")]:
+                                                 f"status this tool can compute is {READY}"),
+                         ("File status", "FAILED - import workbook withheld" if report.file_failed else "ACCEPTED"),
+                         ("Rows accepted", len(report.accepted)),
+                         ("Rows held", len(report.held_rows)),
+                         ("TEMPLATE_VERSION", tc.get("template_version")),
+                         ("Template SHA-256 (supplied)", tc.get("supplied_sha256"))]:
         ws.append([label, value])
     ws.append([])
     ws.append(READINESS_HEADER)
@@ -1187,8 +1570,17 @@ def load_allowed_values() -> dict[str, list[str]] | None:
 
 def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool = False,
               allowed_values: dict[str, list[str]] | None = None,
-              business_rules: Any = None, reference_data: Any = None) -> tuple[bytes, bytes, Report]:
+              business_rules: Any = None, reference_data: Any = None,
+              previously_accepted: Any = None) -> tuple[bytes, bytes, Report]:
     """Return (equus_workbook_bytes, report_workbook_bytes, report).
+
+    The import workbook holds accepted rows only; held rows are listed in the
+    report's Exceptions and Held Rows sheets. When a FILE-level finding exists
+    (report.file_failed, e.g. header mismatch with the approved template) the
+    import workbook is withheld: equus_workbook_bytes is b"" and only the
+    report is produced. previously_accepted: identifiers accepted by an
+    earlier run (see accepted_identifiers()); such rows are held as
+    ALREADY_ACCEPTED so a corrected re-run imports only previously held rows.
 
     strict_pending: refuse to build the output while yellow (pending) columns
     hold data. Independent of report.readiness.
@@ -1210,6 +1602,7 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
     report = Report(source_sha256=hashlib.sha256(source_bytes).hexdigest(), rules=rules, reference_data=refs)
+    report.previously_accepted = {t for t in (identifier_text(v) for v in (previously_accepted or ())) if t}
     if allowed_values is None:
         allowed_values = load_allowed_values() or {}
     report.allowed_values = {h: {str(v).lower() for v in vals} for h, vals in allowed_values.items()}
@@ -1222,8 +1615,15 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
                                  ", ".join(f"{c.letter} {c.topia or c.ui}" for c in pending))
     keyed_dependents = read_dependent_sources(src_wb, layout, report)
     rows = build_records(src_ws, report.columns, layout, report, keyed_dependents)
+    validate_row_structure(rows, report)
     report.summarise_values()
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
+    check_template_headers(out, template_bytes, report)
     reconcile(src_ws, report.columns, out, report)
+    for where, fld, msg in report.warnings:  # every finding carries a code and a level
+        report.add_exception(cfg.EXC_VALIDATION_WARNING, f"{fld}: {msg}", where)
     report.readiness = compute_readiness(report)
-    return out, build_report(report, layout), report
+    report_bytes = build_report(report, layout)
+    if report.file_failed:
+        out = b""  # whole file withheld (FILE level); the report keeps every diagnostic
+    return out, report_bytes, report

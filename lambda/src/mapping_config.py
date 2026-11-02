@@ -68,10 +68,12 @@ EMPLOYEE_ACTION_FIRST = "INSERT"
 EMPLOYEE_ACTION_REPEAT = "IGNORE"
 NEW_ASSIGNMENT_NUMBER = "NEW"
 
-# Topia column (row 4 label) used as the Equus Assignment Identifier, which
-# ties the UPDATE child rows to their INSERT row. The Topia Assignment ID is
-# unique per assignment; an employee can have several historical assignments.
-ASSIGNMENT_IDENTIFIER_LABEL = "assignment id"
+# The Topia column (row 4 label) used as the Equus Assignment Identifier, which
+# ties the UPDATE child rows to their INSERT row, is identity control
+# assignment_identifier_label in business_rules.json (UAT-03; view
+# ASSIGNMENT_IDENTIFIER_LABEL at the end of this file). The Topia Assignment ID
+# is unique per assignment; an employee can have several historical
+# assignments (Q17). There is no fallback to the Employee Number (BR-01).
 
 # Source row-2 technical fields whose spelling differs from the Equus headers.
 # (regex, replacement) applied in order to the upper-cased key.
@@ -219,6 +221,10 @@ DEPENDENT_HOLDS = {
     "HELD_DEPENDENTS_AMBIGUOUS": ("Q1/Q18", "Jake (Equus) / Alka, John (Topia column)",
                                   "Assignment ID occurs on more than one assignment row (or the row has no own "
                                   "Assignment ID); dependents not attached"),
+    # UAT-03: the assignment row itself is held (Exceptions / Held Rows), so
+    # its keyed dependents are held with it until the corrected re-run.
+    "HELD_DEPENDENTS_ASSIGNMENT_HELD": ("Q18", "Alka / Topia (assignment row correction)",
+                                        "the assignment row with this Assignment ID is held; dependents held with it"),
 }
 
 # Optional Equus dropdown lists, {"EQUUS!HEADER": ["Value", ...]}, bundled
@@ -456,7 +462,7 @@ RULE_PARAMETERS = {
 }
 
 _META_CHECKS = (("version", _text), ("effective_version", _text), ("generated_at", _iso_timestamp))
-_TOP_REQUIRED = ("version", "effective_version", "generated_at", "rules")
+_TOP_REQUIRED = ("version", "effective_version", "generated_at", "identity_controls", "rules")
 _TOP_OPTIONAL = ("description", "dependent_source")
 _RULE_REQUIRED = ("id", "Q", "title", "status", "approved_for_import", "owner", "parameters")
 _RULE_OPTIONAL = ("notes", "approval_reference")
@@ -620,6 +626,7 @@ class BusinessRules:
     generated_at: str
     rules: dict  # rule id -> BusinessRule, in file order
     dependent_source: DependentSource | None = None  # None = section absent (no keyed source)
+    identity: "IdentityControls | None" = None
 
     @property
     def file_name(self) -> str:
@@ -701,8 +708,191 @@ def load_business_rules(path=None) -> BusinessRules:
         raise ConfigurationError(source, "$.rules", f"missing rule(s) {', '.join(missing)}: every rule the "
                                                     "engine implements must be declared with its approval status")
     dep = _load_dependent_source(data["dependent_source"], source, data["version"]) if "dependent_source" in data else None
+    identity = _load_identity_controls(data["identity_controls"], source, "$.identity_controls")
     return BusinessRules(source=str(source), version=data["version"], effective_version=data["effective_version"],
-                         generated_at=data["generated_at"], rules=rules, dependent_source=dep)
+                         generated_at=data["generated_at"], rules=rules, dependent_source=dep, identity=identity)
+
+
+# --------------------------------------------------------------------------- identity controls (UAT-03)
+#
+# Validation-only controls of BR-01 / BR-05 / BR-17 / BR-18 (Q1, Q5, Q17-Q19):
+# they never change a value; they hold rows (keep them out of the import
+# workbook), withhold the whole file, or warn, and every finding carries a code.
+
+LEVEL_FILE = "FILE"          # whole import file withheld
+LEVEL_ROW_HELD = "ROW_HELD"  # row excluded from the import workbook, listed in Exceptions / Held Rows
+LEVEL_WARNING = "WARNING"    # reported, value / row kept
+EXCEPTION_LEVELS = (LEVEL_FILE, LEVEL_ROW_HELD, LEVEL_WARNING)
+
+# Every code the engine raises, with the levels configuration may assign.
+# Row-identity codes can never be configured down to WARNING: a row without a
+# usable identifier must not reach the import workbook (BR-01).
+EXC_MISSING_ASSIGNMENT_ID = "MISSING_ASSIGNMENT_ID"
+EXC_MISSING_EMPLOYEE_NUMBER = "MISSING_EMPLOYEE_NUMBER"
+EXC_DUPLICATE_ROW = "DUPLICATE_ROW"
+EXC_CONFLICTING_IDENTIFIER = "CONFLICTING_IDENTIFIER"
+EXC_ALREADY_ACCEPTED = "ALREADY_ACCEPTED"
+EXC_HEADER_MISMATCH = "HEADER_MISMATCH"
+EXC_TEMPLATE_HASH_DIFFERS = "TEMPLATE_HASH_DIFFERS"
+EXC_HEADER_DECISION_PENDING = "HEADER_DECISION_PENDING"
+EXC_ROW_STRUCTURE_INVALID = "ROW_STRUCTURE_INVALID"
+EXC_VALIDATION_WARNING = "VALIDATION_WARNING"
+_HOLD_LEVELS = (LEVEL_ROW_HELD, LEVEL_FILE)
+EXCEPTION_CODES = {
+    EXC_MISSING_ASSIGNMENT_ID: _HOLD_LEVELS,
+    EXC_MISSING_EMPLOYEE_NUMBER: _HOLD_LEVELS,
+    EXC_DUPLICATE_ROW: _HOLD_LEVELS,
+    EXC_CONFLICTING_IDENTIFIER: _HOLD_LEVELS,
+    EXC_ALREADY_ACCEPTED: _HOLD_LEVELS,
+    EXC_HEADER_MISMATCH: (LEVEL_FILE,),
+    EXC_TEMPLATE_HASH_DIFFERS: (LEVEL_WARNING, LEVEL_FILE),
+    EXC_HEADER_DECISION_PENDING: (LEVEL_WARNING,),
+    EXC_ROW_STRUCTURE_INVALID: (LEVEL_FILE,),
+    EXC_VALIDATION_WARNING: (LEVEL_WARNING,),
+}
+# Codes that hold the source row they are raised for.
+ROW_CODES = (EXC_MISSING_ASSIGNMENT_ID, EXC_MISSING_EMPLOYEE_NUMBER, EXC_DUPLICATE_ROW,
+             EXC_CONFLICTING_IDENTIFIER, EXC_ALREADY_ACCEPTED)
+# Column statuses (transform.SourceColumn.status) a duplicate comparison may use.
+COMPARABLE_STATUSES = ("mapped", "address", "contact", "dependent", "rule", "held", "duplicate", "unmapped")
+
+_IDENTITY_REQUIRED = ("control_version", "effective_version", "Q", "status", "owner", "assignment_identifier_label",
+                      "identifier_headers", "duplicate_compare_statuses", "template", "pending_header_decisions",
+                      "exception_codes")
+_IDENTITY_OPTIONAL = ("notes",)
+_TEMPLATE_REQUIRED = ("template_version", "file", "sha256", "header_rows")
+_DECISION_REQUIRED = ("id", "cell", "approved_value", "alternative_value", "alternative_source", "code")
+_CODE_REQUIRED = ("level", "Q", "owner", "description")
+_CELL_RE = re.compile(r"^([A-Z]{1,3})([1-9][0-9]*)$")
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ExceptionCode:
+    code: str
+    level: str
+    q: str
+    owner: str
+    description: str
+
+
+@dataclass(frozen=True)
+class IdentityControls:
+    control_version: str
+    effective_version: str
+    q: str
+    status: str
+    owner: str
+    assignment_identifier_label: str
+    identifier_headers: tuple
+    duplicate_compare_statuses: tuple
+    template_version: str
+    template_file: Path
+    template_sha256: str
+    header_rows: tuple
+    pending_header_decisions: tuple  # of dicts
+    codes: dict  # code -> ExceptionCode
+    notes: str = ""
+
+    def code(self, code: str) -> ExceptionCode:
+        return self.codes[code]
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_identity_controls(raw, source, path: str) -> IdentityControls:
+    _check_object(raw, path, source, _IDENTITY_REQUIRED, _IDENTITY_OPTIONAL)
+    for key in ("control_version", "effective_version", "owner"):
+        _run(_text, raw[key], source, f"{path}.{key}")
+    _run(_q_number, raw["Q"], source, f"{path}.Q")
+    _run(_status, raw["status"], source, f"{path}.status")
+    if "notes" in raw:
+        _run(_text, raw["notes"], source, f"{path}.notes")
+    _run(_label, raw["assignment_identifier_label"], source, f"{path}.assignment_identifier_label")
+
+    headers = raw["identifier_headers"]
+    if not isinstance(headers, list) or not headers or not all(isinstance(h, str) and h.strip() for h in headers):
+        raise ConfigurationError(source, f"{path}.identifier_headers", "must be a non-empty list of Equus headers")
+    if COL_ASSIGNMENT_IDENTIFIER not in headers:
+        raise ConfigurationError(source, f"{path}.identifier_headers", f"must include {COL_ASSIGNMENT_IDENTIFIER!r}")
+
+    statuses = raw["duplicate_compare_statuses"]
+    if not isinstance(statuses, list) or not statuses:
+        raise ConfigurationError(source, f"{path}.duplicate_compare_statuses", "must be a non-empty list")
+    for i, s in enumerate(statuses):
+        if s not in COMPARABLE_STATUSES:
+            raise ConfigurationError(source, f"{path}.duplicate_compare_statuses[{i}]",
+                                     f"unsupported column status {s!r}; allowed: {', '.join(COMPARABLE_STATUSES)}")
+
+    tpath = f"{path}.template"
+    tpl = raw["template"]
+    _check_object(tpl, tpath, source, _TEMPLATE_REQUIRED, ())
+    _run(_text, tpl["template_version"], source, f"{tpath}.template_version")
+    _run(_text, tpl["file"], source, f"{tpath}.file")
+    template_file = (CONFIG_DIR / tpl["file"]).resolve()
+    if CONFIG_DIR not in template_file.parents or not template_file.is_file():
+        raise ConfigurationError(source, f"{tpath}.file", "must name a template file bundled under lambda/src")
+    if not (isinstance(tpl["sha256"], str) and _SHA_RE.match(tpl["sha256"])):
+        raise ConfigurationError(source, f"{tpath}.sha256", "must be a lower-case hex SHA-256")
+    actual = _sha256_file(template_file)
+    if actual != tpl["sha256"]:
+        raise ConfigurationError(source, f"{tpath}.sha256",
+                                 f"bundled template {tpl['file']} has SHA-256 {actual}, not the approved version; "
+                                 "update template_version and sha256 only with an approved template")
+    rows = tpl["header_rows"]
+    if (not isinstance(rows, list) or not rows or len(set(rows)) != len(rows)
+            or not all(isinstance(r, int) and not isinstance(r, bool) and 1 <= r < TARGET_DATA_START_ROW
+                       for r in rows)):
+        raise ConfigurationError(source, f"{tpath}.header_rows",
+                                 f"must be distinct row numbers between 1 and {TARGET_DATA_START_ROW - 1}")
+
+    cpath = f"{path}.exception_codes"
+    codes_raw = raw["exception_codes"]
+    if not isinstance(codes_raw, dict):
+        raise ConfigurationError(source, cpath, "must be a JSON object")
+    codes = {}
+    for code, entry in codes_raw.items():
+        epath = f"{cpath}.{code}"
+        if code not in EXCEPTION_CODES:
+            raise ConfigurationError(source, epath, f"unsupported exception code; supported: {', '.join(EXCEPTION_CODES)}")
+        _check_object(entry, epath, source, _CODE_REQUIRED, ())
+        if entry["level"] not in EXCEPTION_CODES[code]:
+            raise ConfigurationError(source, f"{epath}.level",
+                                     f"must be one of {list(EXCEPTION_CODES[code])} for {code}")
+        _run(_q_number, entry["Q"], source, f"{epath}.Q")
+        _run(_text, entry["owner"], source, f"{epath}.owner")
+        _run(_text, entry["description"], source, f"{epath}.description")
+        codes[code] = ExceptionCode(code, entry["level"], entry["Q"], entry["owner"], entry["description"])
+    missing = [c for c in EXCEPTION_CODES if c not in codes]
+    if missing:
+        raise ConfigurationError(source, cpath, f"missing exception code(s) {', '.join(missing)}: every code the "
+                                                "engine raises must be declared with its level, Q and owner")
+
+    dpath = f"{path}.pending_header_decisions"
+    decisions = raw["pending_header_decisions"]
+    if not isinstance(decisions, list):
+        raise ConfigurationError(source, dpath, "must be a list")
+    for i, d in enumerate(decisions):
+        p = f"{dpath}[{i}]"
+        _check_object(d, p, source, _DECISION_REQUIRED, ())
+        for key in ("id", "approved_value", "alternative_value", "alternative_source"):
+            _run(_text, d[key], source, f"{p}.{key}")
+        m = _CELL_RE.match(d["cell"]) if isinstance(d["cell"], str) else None
+        if not m or int(m.group(2)) not in rows:
+            raise ConfigurationError(source, f"{p}.cell", "must be a cell reference like 'A3' in one of header_rows")
+        if d["code"] != EXC_HEADER_DECISION_PENDING:
+            raise ConfigurationError(source, f"{p}.code", f"must be {EXC_HEADER_DECISION_PENDING!r}")
+
+    return IdentityControls(
+        control_version=raw["control_version"], effective_version=raw["effective_version"], q=raw["Q"],
+        status=raw["status"], owner=raw["owner"], assignment_identifier_label=raw["assignment_identifier_label"],
+        identifier_headers=tuple(headers), duplicate_compare_statuses=tuple(statuses),
+        template_version=tpl["template_version"], template_file=template_file, template_sha256=tpl["sha256"],
+        header_rows=tuple(rows), pending_header_decisions=tuple(dict(d) for d in decisions), codes=codes,
+        notes=raw.get("notes", ""))
 
 
 # --------------------------------------------------------------------------- reference data
@@ -839,3 +1029,8 @@ CANCELLED_PHASE = BUSINESS_RULES.params(RULE_CANCELLATION_PHASE)["value"]
 # Keyed dependent source in force (business_rules.json $.dependent_source).
 DEPENDENT_SOURCE = BUSINESS_RULES.dependent_source
 RESOURCE_MAP = dict(REFERENCE_DATA[RESOURCE_LIST_ID].values) if REFERENCE_DATA[RESOURCE_LIST_ID].usable else {}
+# Identity controls (UAT-03): read-only views.
+IDENTITY_CONTROLS = BUSINESS_RULES.identity
+ASSIGNMENT_IDENTIFIER_LABEL = IDENTITY_CONTROLS.assignment_identifier_label
+TEMPLATE_VERSION = IDENTITY_CONTROLS.template_version
+APPROVED_TEMPLATE_SHA256 = IDENTITY_CONTROLS.template_sha256

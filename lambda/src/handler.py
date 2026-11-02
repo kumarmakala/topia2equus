@@ -19,6 +19,12 @@ Import readiness (transform.Readiness) is independent of STRICT_PENDING. The
 import workbook is named <stem>_EQUUS_<stamp>.xlsx only when readiness is
 READY_FOR_UAT_EXECUTION; otherwise <stem>_EQUUS_DRAFT_<stamp>.xlsx. The status
 is written to the S3 object metadata ("readiness") and the log summary.
+
+A FILE-level finding (e.g. output headers differ from the approved template,
+Q5) withholds the import workbook: only reports/<stem>_FILE_REJECTED_<stamp>.xlsx
+is written and the invocation fails. Held rows (ROW_HELD) are never in the
+import workbook; they are listed in the report's Exceptions and Held Rows
+sheets (docs/uat/REPROCESSING_PROCEDURE.md).
 """
 
 from __future__ import annotations
@@ -176,7 +182,16 @@ def lambda_handler(event, context):
             "readiness": readiness.status,
             "readiness-reasons": str(len(readiness.reasons)),
             "business-rules-version": report.business_rules_version,
+            "rows-held": str(len(report.held_rows)),
+            "file-status": "FAILED" if report.file_failed else "ACCEPTED",
         })
+        if report.file_failed:
+            # FILE-level finding (e.g. header mismatch with the approved
+            # template, Q5): withhold the import workbook, keep the report.
+            rejected_key = f"{dest_prefix}reports/{stem}_FILE_REJECTED_{stamp}.xlsx"
+            _put_once(dest_bucket, rejected_key, report_bytes, meta)
+            raise RuntimeError(f"File-level validation failed for s3://{bucket}/{key}; "
+                               f"see s3://{dest_bucket}/{rejected_key}")
         if not report.reconciliation_ok:
             # Keep the evidence, withhold the import file, and fail the
             # invocation so the event lands on the on-failure queue.
@@ -195,6 +210,7 @@ def lambda_handler(event, context):
             "output": f"s3://{dest_bucket}/{out_key}",
             "report": f"s3://{dest_bucket}/{report_key}",
             "assignments": report.assignments,
+            "rows_held": len(report.held_rows),
             "rows_written": report.rows_written,
             "unmapped_source_columns": sum(c.status == "unmapped" for c in report.columns),
             "warnings": len(report.warnings),

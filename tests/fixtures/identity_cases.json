@@ -1,0 +1,54 @@
+{
+  "description": "UAT-03 synthetic identity / duplicate scenarios. Each case starts from tests/fixtures/topia_sample.xlsx (synthetic: employees 10001 / 10002, Assignment IDs 90001 / 90002 on source rows 5 / 6) and copies a source row to a new row, then sets cells by normalised Topia row-4 label. All names and numbers are invented; no real data.",
+  "base_fixture": "topia_sample.xlsx",
+  "cases": {
+    "missing_assignment_id": {
+      "description": "AC-1: third employee whose Assignment ID is blank",
+      "rows": [
+        {"copy_from": 5, "to": 7, "set": {"assignment id": null, "employee id": 10003, "first name": "Synthone", "last name": "TESTCASE"}}
+      ]
+    },
+    "placeholder_assignment_id": {
+      "description": "AC-1 variant: Assignment ID holds a blank placeholder token",
+      "rows": [
+        {"copy_from": 5, "to": 7, "set": {"assignment id": "Not Provided", "employee id": 10004, "first name": "Synthtwo"}}
+      ]
+    },
+    "exact_duplicate": {
+      "description": "AC-2: source row 5 repeated unchanged",
+      "rows": [
+        {"copy_from": 5, "to": 7, "set": {}}
+      ]
+    },
+    "conflicting_identifier": {
+      "description": "AC-2: Assignment ID of row 6 reused on a row with different data",
+      "rows": [
+        {"copy_from": 6, "to": 7, "set": {"first name": "Synthother"}}
+      ]
+    },
+    "conflicting_identifier_other_employee": {
+      "description": "Assignment ID of row 5 reused by a different employee",
+      "rows": [
+        {"copy_from": 6, "to": 7, "set": {"assignment id": 90001}}
+      ]
+    },
+    "multiple_assignments": {
+      "description": "AC-3: employee 10001 with three historical assignments; one identifier with leading zeros, one numeric",
+      "rows": [
+        {"copy_from": 5, "to": 7, "set": {"assignment id": "00123"}},
+        {"copy_from": 5, "to": 8, "set": {"assignment id": 90011.0}}
+      ]
+    },
+    "missing_employee_number": {
+      "description": "Row with an Assignment ID but no Employee Number",
+      "rows": [
+        {"copy_from": 6, "to": 7, "set": {"employee id": null, "assignment id": 90021}}
+      ]
+    }
+  },
+  "dependents": {
+    "description": "Four synthetic dependents on source row 5, appended as ASSIGNMENT_DEPENDENT columns (layout of the Topia 'Dependent Import' sheet), to compare the generated rows with Jake's ' Mny dependents Ex' structure",
+    "row": 5,
+    "first_names": ["Childa", "Childb", "Childc", "Childd"]
+  }
+}

@@ -33,8 +33,8 @@ rules, read it as "behaviour once approved". See
   - SRC F (Topia ID) is red, "not required".
   - Jake said verbally: Topia ID → Assignment Identifier and Assignment Number. This hasn't been confirmed in writing.
 - **Options:** Employee Number (matches the EQ sample); Topia Assignment ID (unique per assignment, so one employee can have several historical assignments).
-- **Code today:** Topia Assignment ID (SRC X), falling back to the Employee Number when it's blank. The same value also goes to `ASSIGNMENT_CF!CF_TEXT029` (Topia File Number).
-- **Setting:** `ASSIGNMENT_IDENTIFIER_LABEL` in `lambda/src/mapping_config.py`.
+- **Code today (UAT-03):** Topia Assignment ID (SRC X), written as text. The fallback to the Employee Number has been removed (BR-01): a row with a blank Assignment ID is HELD (`MISSING_ASSIGNMENT_ID`, Exceptions / Held Rows sheets) and kept out of the import workbook. The same value also goes to `ASSIGNMENT_CF!CF_TEXT029` (Topia File Number). See `docs/uat/UAT-03_identity_controls.md`.
+- **Setting:** `identity_controls.assignment_identifier_label` in `lambda/src/business_rules.json` (view `ASSIGNMENT_IDENTIFIER_LABEL` in `lambda/src/mapping_config.py`).
 - **Why it matters:** the Employee Number repeats across one person's assignments. If it's used as the identifier, their UPDATE rows can attach to the wrong assignment.
 
 ### 2. Resource usernames

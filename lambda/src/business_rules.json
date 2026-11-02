@@ -1,7 +1,7 @@
 {
   "description": "Business rules of the Topia -> Equus EAFH transformation. A rule changes import output only while approved_for_import is true; a Jake answer is evidence, not approval (every tracker Status in clarifications/jake-1.xlsx column I is Open). Validated strictly by mapping_config.load_business_rules().",
-  "version": "1.1.0",
-  "effective_version": "1.1.0",
+  "version": "1.2.0",
+  "effective_version": "1.2.0",
   "generated_at": "2026-11-02",
   "dependent_source": {
     "Q": "Q11/Q18",
@@ -18,6 +18,85 @@
         "assignment": "assignment id"
       },
       "child_groups": "repeated_column_groups"
+    }
+  },
+  "identity_controls": {
+    "control_version": "1.0.0",
+    "effective_version": "1.0.0",
+    "Q": "Q1/Q5/Q17/Q18/Q19",
+    "status": "confirmed_by_jake",
+    "owner": "Jake (Equus) / Alka, John (Topia)",
+    "notes": "UAT-03 (BR-01, BR-05, BR-17, BR-18). Validation and holding only: these controls never change a value, they keep rows out of the import workbook and report them. No fallback from a missing Assignment Identifier to the Employee Number (BR-01). TEMPLATE_VERSION EAFH-bundled-1 = the template bundled at lambda/src/templates/equus_eafh_template.xlsx (SHA-256 below); Equus has not supplied an official template version number (D2 / Q5, owner Jake). D1 (which Topia column is 'Topia ID') is still open; column X 'Assignment ID' stays the identifier per the assessment until Jake / Alka decide.",
+    "assignment_identifier_label": "assignment id",
+    "identifier_headers": [
+      "Assignment Identifier",
+      "ASSIGNMENT_CF!CF_TEXT029"
+    ],
+    "duplicate_compare_statuses": [
+      "mapped",
+      "address",
+      "contact",
+      "dependent",
+      "rule",
+      "held"
+    ],
+    "template": {
+      "template_version": "EAFH-bundled-1",
+      "file": "templates/equus_eafh_template.xlsx",
+      "sha256": "c90e9fc057e9fbcc5b1b38e8b4821dd266b92bd7557915f48f7925fc3f445be7",
+      "header_rows": [1, 2, 3]
+    },
+    "pending_header_decisions": [
+      {
+        "id": "D2",
+        "cell": "A3",
+        "approved_value": "A",
+        "alternative_value": "Employee Command",
+        "alternative_source": "clarifications/jake-1.xlsx ' Mny dependents Ex'!A3",
+        "code": "HEADER_DECISION_PENDING"
+      }
+    ],
+    "exception_codes": {
+      "MISSING_ASSIGNMENT_ID": {
+        "level": "ROW_HELD", "Q": "Q1", "owner": "Alka (Topia source) / Jake (Equus identifier, D1)",
+        "description": "No Assignment Identifier in the source row; never replaced by the Employee Number (BR-01)."
+      },
+      "MISSING_EMPLOYEE_NUMBER": {
+        "level": "ROW_HELD", "Q": "Q1", "owner": "Alka (Topia source)",
+        "description": "No Employee Number (Talent Link ID); the assignment cannot be linked to an employee (Q1, Q17)."
+      },
+      "DUPLICATE_ROW": {
+        "level": "ROW_HELD", "Q": "Q5", "owner": "Alka (Topia extract)",
+        "description": "Every compared source cell equals an earlier row; the earlier row is accepted, this one is held (Q5: duplicates can create duplicates in Equus)."
+      },
+      "CONFLICTING_IDENTIFIER": {
+        "level": "ROW_HELD", "Q": "Q1/Q5", "owner": "Alka / John (Topia) / Jake (D1)",
+        "description": "The same Assignment Identifier appears on rows with different data; every such row is held."
+      },
+      "ALREADY_ACCEPTED": {
+        "level": "ROW_HELD", "Q": "Q5", "owner": "Migration team (controlled reprocessing)",
+        "description": "Identifier was accepted by an earlier run listed as previously accepted; not imported again (docs/uat/REPROCESSING_PROCEDURE.md)."
+      },
+      "HEADER_MISMATCH": {
+        "level": "FILE", "Q": "Q5", "owner": "Jake (Equus template)",
+        "description": "Output header rows differ from the approved template; Q5: header issues fail the whole import, so the import workbook is withheld."
+      },
+      "TEMPLATE_HASH_DIFFERS": {
+        "level": "WARNING", "Q": "Q5", "owner": "Jake (Equus template)",
+        "description": "Supplied template headers match, but its SHA-256 differs from the approved template version."
+      },
+      "HEADER_DECISION_PENDING": {
+        "level": "WARNING", "Q": "Q5", "owner": "Jake (Equus template)",
+        "description": "Header cell differs between the approved template and Jake's example; header kept as in the approved template until Jake decides."
+      },
+      "ROW_STRUCTURE_INVALID": {
+        "level": "FILE", "Q": "Q17/Q18/Q19", "owner": "Migration team (engine defect)",
+        "description": "Generated rows do not follow the INSERT / UPDATE pattern of Jake's example sheet ' Mny dependents Ex'."
+      },
+      "VALIDATION_WARNING": {
+        "level": "WARNING", "Q": "Q5", "owner": "Alka / John (mapping review)",
+        "description": "Value-level validation warning; the value is kept (see Warnings sheet)."
+      }
     }
   },
   "rules": [
