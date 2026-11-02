@@ -343,6 +343,29 @@ READINESS_ITEMS = {
     "identifier": ("Q1", "Jake (Equus) / Alka, John (Topia column)"),
     "reconciliation": ("Q27", "Schneider + Jake"),
     "template_configuration": ("Q5/Q29", "Jake (Equus template)"),
+    # Reconciliation explanations (UAT-05). Q / owner per the evidence
+    # assessment section 3 (Q29, Q30, Q43 rows); reporting only, not approvals.
+    "excluded_colour": ("Q30", "Schneider (scope and exclusions)"),
+    "not_migrated": ("Q29/Q30", "Jake / Alka (mapping disposition), Schneider (scope)"),
+    "blank_token": ("Q43", "Alka (placeholder normalisation)"),
+}
+
+# Source columns that are not migrated (no Equus target, or FIELD_OVERRIDES
+# None) and whose decision belongs to a specific question; used only to
+# attribute the reconciliation's pending_target cells. Keyed by normalised
+# Topia row-4 label; Q / owner from clarifications/JAKE_Q1-Q43_EVIDENCE_ASSESSMENT.md:
+#   Q9  section 2 ("Schneider must decide"); Q34 section 3 ("AB unmapped",
+#   owner Jake + Schneider); Q41 section 3 (EJ/EL/EN/EP/ER/FE unmapped, owner
+#   Jake/Schneider).
+NOT_MIGRATED_QUESTIONS = {
+    "pii nationality 1": ("Q9", "Schneider"),
+    "assignment status": ("Q34", "Jake + Schneider"),
+    "primary mobility email": ("Q41", "Jake / Schneider"),
+    "hr advisor home email": ("Q41", "Jake / Schneider"),
+    "hr advisor host email": ("Q41", "Jake / Schneider"),
+    "line manager home email": ("Q41", "Jake / Schneider"),
+    "line manager host email": ("Q41", "Jake / Schneider"),
+    "move initiator email": ("Q41", "Jake / Schneider"),
 }
 
 

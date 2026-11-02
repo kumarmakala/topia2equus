@@ -131,8 +131,11 @@ class Report:
     rows_written: int = 0
     data_rows: int = 0
     source_sha256: str = ""
-    reconciliation: list[dict] = field(default_factory=list)
+    reconciliation: list[dict] = field(default_factory=list)  # one row per source column (see reconcile)
     reconciliation_ok: bool = False
+    reconciliation_records: list[dict] = field(default_factory=list)  # one row per source data row
+    reconciliation_summary: dict = field(default_factory=dict)
+    keyed_children: dict = field(default_factory=dict)  # source row -> [{"sheet", "row", "record"}] attached
     # Configuration in force and what the rules did.
     rules: Any = None  # mapping_config.BusinessRules
     reference_data: dict = field(default_factory=dict)  # list id -> mapping_config.ReferenceList
@@ -1106,6 +1109,8 @@ def _attach_keyed_dependents(join_key: str | None, employee: Any, keyed: dict[st
         for rec in entry["records"]:
             validate_family(rec, cfg.FAMILY_PREFIXES[1], report, f"{sheet} row {entry['row']}")
             out.append(rec)
+            report.keyed_children.setdefault(report.current_row, []).append(
+                {"sheet": sheet, "row": entry["row"], "record": rec})
     if mismatched:
         report.hold_dependents("HELD_DEPENDENTS_EMPLOYEE_MISMATCH", sheet, [f"row {e['row']}" for e in mismatched],
                                sum(len(e["records"]) for e in mismatched), f"assignment at {row_ref}")
@@ -1148,62 +1153,445 @@ def write_output(template_bytes: bytes, rows: list[dict], layout_ws_name: str, r
     return buf.getvalue()
 
 
+#: Every non-blank source cell falls in exactly one of these categories
+#: (UAT-05). "written" = written unchanged or by an approved / deterministic
+#: conversion (date parse, number format, approved rule or lookup);
+#: "failed_conversion" = unparseable date left blank (warned);
+#: "replaced_by_rule" = source value overwritten by an *approved* rule.
+#: "set_by_rule" (not a source category) counts output cells an approved rule
+#: filled where the source cell was blank.
+RECON_CATEGORIES = ("written", "blank_token", "provisional_conversion", "gated_rule", "held_row",
+                    "excluded_colour", "pending_target", "failed_conversion", "replaced_by_rule", "unexplained")
+#: Column statuses whose cells must reach the import workbook.
+MIGRATED_STATUSES = ("mapped", "duplicate", "rule", "address", "contact", "dependent")
+_CHILD_TABLES = {"address": ("ASSIGNMENT_MAILING_ADDRESS",), "contact": ("ASSIGNMENT_EMPLOYEE_CONTACT",),
+                 "dependent": (cfg.FAMILY_PREFIXES[1], cfg.FAMILY_PREFIXES[1] + "_CF"),
+                 "spouse": (cfg.FAMILY_PREFIXES[0], cfg.FAMILY_PREFIXES[0] + "_CF")}
+
+
+def _present(raw: Any) -> bool:
+    return raw is not None and str(raw).strip() != ""
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
+def _same_value(raw: Any, out: Any) -> bool:
+    """True when the written cell carries the source value unchanged (dates by
+    calendar day, numbers by value, text stripped)."""
+    if out is None:
+        return False
+    if isinstance(out, (date, datetime)):
+        src = raw if isinstance(raw, (date, datetime)) else to_date(raw)
+        return src is not None and _ordinal(src) == _ordinal(out)
+    if isinstance(raw, (date, datetime)):
+        return False
+    return _text(raw) == _text(out)
+
+
+def _would_write(header: str, raw: Any, layout: TargetLayout) -> bool:
+    """A source cell convert() keeps (non-blank, no placeholder, parseable date)."""
+    if is_blank(raw) or is_dirty_placeholder(raw):
+        return False
+    return not layout.is_date(header) or to_date(raw.strip() if isinstance(raw, str) else raw) is not None
+
+
+def _explain_changed(header: str, raw: Any, out: Any, report: Report) -> str | None:
+    """Category of a written value that differs from its source cell, or None."""
+    text = _text(raw)
+    if (header, text, out) in report.provisional:
+        return "provisional_conversion"  # Q12/Q3: rule country_name_to_iso3 not approved
+    if header in cfg.COUNTRY_HEADERS and isinstance(out, str):
+        if text.upper() == out and out in cfg.ISO3_CODES:
+            return "written"
+        if report.rule_enabled(cfg.RULE_COUNTRY_ISO3) and cfg.COUNTRY_ISO3.get(text.lower()) == out:
+            return "written"
+    value_maps = report.rules.params(cfg.RULE_VALUE_MAPS)["maps"]
+    if report.rule_enabled(cfg.RULE_VALUE_MAPS) and value_maps.get(header, {}).get(text.lower()) == out:
+        return "written"
+    lookup = report.lookup_values(header)
+    if text in lookup and lookup[text] == out:
+        return "written"
+    return None
+
+
+def _table(header: Any) -> str:
+    return str(header).split("!")[0] if header else ""
+
+
+def _output_blocks(out_ws, headers: dict) -> tuple[dict, list, int, int, int]:
+    """Group output rows by Assignment Identifier: an INSERT row followed by
+    its UPDATE rows. Returns ({identifier: [[row, ...], ...]}, unexpected
+    rows, INSERT count, UPDATE count, non-empty output rows)."""
+    cmd_c, ident_c = headers.get(cfg.COL_ASSIGNMENT_COMMAND), headers.get(cfg.COL_ASSIGNMENT_IDENTIFIER)
+    blocks: dict[str, list[list[int]]] = defaultdict(list)
+    unexpected: list[int] = []
+    inserts = updates = total = 0
+    current: tuple[str, list[int]] | None = None
+    for r in range(cfg.TARGET_DATA_START_ROW, out_ws.max_row + 1):
+        if all(out_ws.cell(r, c).value is None for c in headers.values()):
+            continue
+        total += 1
+        command = out_ws.cell(r, cmd_c).value
+        ident = identifier_text(out_ws.cell(r, ident_c).value) if ident_c else None
+        if command == "INSERT" and ident is not None:
+            inserts += 1
+            current = (ident, [r])
+            blocks[ident].append(current[1])
+        elif command == "UPDATE" and current is not None and ident == current[0]:
+            updates += 1
+            current[1].append(r)
+        else:
+            inserts += command == "INSERT"
+            updates += command == "UPDATE"
+            unexpected.append(r)
+    return blocks, unexpected, inserts, updates, total
+
+
 def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -> None:
-    """Compare every mapped source cell with the cell actually written to the
-    output workbook. Each difference must have a known reason; anything else
-    is counted as unexplained and fails the run."""
+    """Source-to-target reconciliation (UAT-05, master command section 8).
+
+    Keyed on the Assignment Identifier, never on row position: every source
+    data row is accepted (one INSERT row plus UPDATE rows for child records)
+    or held. Every non-blank source cell of every column is counted in exactly
+    one RECON_CATEGORIES bucket: mapped cells against the INSERT row; address,
+    contact and dependent cells against the output child row they create (the
+    k-th populated group of an assignment is on the k-th row of its block);
+    held rows, red columns, gated rules and columns without an approved Equus
+    target are explained categories. Anything else is unexplained.
+
+    reconciliation_ok only when unexplained == 0 AND the counts balance
+    (source rows = accepted + held; INSERT rows = accepted; UPDATE rows =
+    expected expansion rows; child records expected = written per record)."""
     out_ws = openpyxl.load_workbook(io.BytesIO(output))[cfg.TARGET_SHEET]
-    out_headers = {out_ws.cell(cfg.TARGET_HEADER_ROW, c).value: c for c in range(1, out_ws.max_column + 1)}
+    out_headers = {}
+    for c in range(1, out_ws.max_column + 1):
+        h = out_ws.cell(cfg.TARGET_HEADER_ROW, c).value
+        if h is not None:
+            out_headers[norm_key(h) or str(h).strip()] = c
+    layout = read_target_layout(out_ws)
     all_rows = _data_rows(src_ws, cols)
     report.data_rows = len(all_rows)
-    report.reconciliation = []
-    command_col = out_headers.get(cfg.COL_ASSIGNMENT_COMMAND)
-    if command_col is None:  # header mismatch: nothing can be reconciled
-        report.reconciliation_ok = False
+    report.reconciliation, report.reconciliation_records = [], []
+    reasons: list[str] = []
+    if cfg.COL_ASSIGNMENT_COMMAND not in out_headers or cfg.COL_ASSIGNMENT_IDENTIFIER not in out_headers:
+        report.reconciliation_ok = False  # header mismatch: nothing can be reconciled
+        report.reconciliation_summary = {"result": "FAILED", "source_rows": len(all_rows),
+                                         "reasons": ["output has no Assignment Command / Identifier header"]}
         return
-    insert_rows = [r for r in range(cfg.TARGET_DATA_START_ROW, out_ws.max_row + 1)
-                   if out_ws.cell(r, command_col).value == "INSERT"]
-    # Held rows are accounted for in Exceptions / Held Rows, not in the import:
-    # every source row is either accepted (one INSERT row) or held.
-    source_rows = [r for r in all_rows if r not in report.held_rows]
-    counts_ok = (len(source_rows) == len(insert_rows) == report.assignments
-                 and report.data_rows == report.assignments + len(report.held_rows))
+
+    blocks, unexpected_rows, insert_count, update_count, output_rows = _output_blocks(out_ws, out_headers)
+    accepted = {a["row"]: a["identifier"] for a in report.accepted}
+    held = report.held_rows
     rule_targets = report.rules.applied_targets()
 
-    for col in (c for c in cols if c.status == "mapped"):
-        out_c = out_headers.get(col.target)
-        if out_c is None:
-            counts_ok = False
-            continue
-        row = {"col": col.letter, "topia": col.topia or col.ui, "header": col.target, "source": 0, "written": 0,
-               "blank_token": 0, "failed_conversion": 0, "set_by_rule": 0, "unexplained": 0,
-               "source_date_total": 0, "written_date_total": 0}
-        is_date_col = False
-        for sr, orow in zip(source_rows, insert_rows):
-            raw, out = src_ws.cell(sr, col.idx).value, out_ws.cell(orow, out_c).value
-            present = raw is not None and str(raw).strip() != ""
-            row["source"] += present
-            row["written"] += out is not None
-            if present and out is None:
-                if is_blank(raw) or is_dirty_placeholder(raw):
-                    row["blank_token"] += 1
-                elif isinstance(raw, str) and to_date(raw) is None and col.target.endswith("DATE"):
-                    row["failed_conversion"] += 1
+    def cell(r: int, header: str) -> Any:
+        c = out_headers.get(header)
+        return out_ws.cell(r, c).value if c is not None else None
+
+    def block_of(r: int) -> list[int]:
+        found = blocks.get(accepted.get(r)) or []
+        return found[0] if len(found) == 1 else []
+
+    # Field table: one row per source column.
+    rows_by_col: dict[int, dict] = {}
+
+    def field_row(col: SourceColumn) -> dict:
+        if col.idx not in rows_by_col:
+            rows_by_col[col.idx] = {
+                "col": col.letter, "topia": col.topia or col.ui, "header": col.target, "group": col.status,
+                "status": col.status, "colour": col.colour, "flags": ", ".join(col.flags), "source": 0,
+                **{k: 0 for k in RECON_CATEGORIES}, "set_by_rule": 0,
+                "source_date_total": None, "written_date_total": None, "q": set(), "owner": set(), "reason": set()}
+        return rows_by_col[col.idx]
+
+    def explain(row: dict, category: str, q: str, owner: str, reason: str) -> None:
+        row[category] += 1
+        row["q"].add(q)
+        row["owner"].add(owner)
+        row["reason"].add(reason)
+
+    def column_disposition(col: SourceColumn) -> tuple[str, str, str, str]:
+        """(category, q, owner, reason) of a column that is not migrated."""
+        if col.status == "excluded":
+            q, owner = cfg.READINESS_ITEMS["excluded_colour"]
+            return "excluded_colour", q, owner, col.note
+        if col.status == "held":
+            rule = report.rules.rule(col.rule)
+            return "gated_rule", rule.q, rule.owner, f"rule {rule.id} {rule.status}, not approved_for_import"
+        if "MISSING_TARGET" in col.flags:
+            q, owner = cfg.READINESS_ITEMS["missing_target"]
+        elif col.label in cfg.NOT_MIGRATED_QUESTIONS:
+            q, owner = cfg.NOT_MIGRATED_QUESTIONS[col.label]
+        elif "PENDING" in col.flags:
+            q, owner = cfg.READINESS_ITEMS["pending_column"]
+        else:
+            q, owner = cfg.READINESS_ITEMS["not_migrated"]
+        return "pending_target", q, owner, f"no approved Equus target ({col.status}: {col.note})"
+
+    def held_reason(r: int) -> tuple[str, str, str]:
+        specs = [report.rules.identity.code(code) for code in held[r]]
+        return ("/".join(sorted({s.q for s in specs})), "; ".join(sorted({s.owner for s in specs})),
+                "row held: " + ", ".join(held[r]))
+
+    def compare(row: dict, col: SourceColumn, header: str, raw: Any, out: Any) -> None:
+        """One present, non-placeholder source cell against its written cell."""
+        if _same_value(raw, out):
+            row["written"] += 1
+            if isinstance(out, (date, datetime)):
+                row["source_date_total"] = (row["source_date_total"] or 0) + _ordinal(out)
+                row["written_date_total"] = (row["written_date_total"] or 0) + _ordinal(out)
+            return
+        if out is None:
+            if layout.is_date(header) and to_date(raw.strip() if isinstance(raw, str) else raw) is None:
+                explain(row, "failed_conversion", "Q24", "Jake", "unparseable date left blank (warned)")
+            else:
+                row["unexplained"] += 1
+            return
+        category = _explain_changed(header, raw, out, report)
+        if category == "provisional_conversion":
+            rule = report.rules.rule(cfg.RULE_COUNTRY_ISO3)
+            explain(row, category, rule.q, rule.owner, f"rule {rule.id} not approved; conversion provisional")
+        elif category == "written":
+            row["written"] += 1
+        elif header in rule_targets:
+            row["replaced_by_rule"] += 1  # source value replaced by an approved rule
+        else:
+            row["unexplained"] += 1
+            if isinstance(out, (date, datetime)):
+                src = to_date(raw)
+                row["source_date_total"] = (row["source_date_total"] or 0) + _ordinal(src)
+                row["written_date_total"] = (row["written_date_total"] or 0) + _ordinal(out)
+
+    addresses = [c for c in cols if c.status == "address"]
+    contacts = [c for c in cols if c.status == "contact"]
+    dep_groups = _group_dependents(cols)
+    spouse_cols = [c for c in cols if c.status == "mapped" and _table(c.target) in _CHILD_TABLES["spouse"]]
+    bq, bowner = cfg.READINESS_ITEMS["blank_token"]
+
+    for col in cols:
+        if col.status in MIGRATED_STATUSES:
+            field_row(col)
+
+    record_unexplained_total = 0
+    for r in all_rows:
+        ident, employee = report.row_identity.get(r, (None, None))
+        block = block_of(r) if r in accepted else []
+        insert_row = block[0] if block else None
+        rec = {"source_row": r, "identifier": ident, "employee": employee,
+               "status": "held" if r in held else "accepted", "codes": ", ".join(held.get(r, [])),
+               "output_rows": len(block), "insert_rows": 1 if block else 0, "update_rows": max(0, len(block) - 1),
+               "unexplained": 0, "notes": []}
+        expected = {"address": 0, "contact": 0, "dependent": 0, "spouse": 0}
+
+        # Per-cell categorisation.
+        child_pos = {"address": 0, "contact": 0, "dependent": 0}
+        for col in cols:
+            raw = src_ws.cell(r, col.idx).value
+            if not _present(raw):
+                continue
+            row = field_row(col)
+            row["source"] += 1
+            if r in held:
+                explain(row, "held_row", *held_reason(r))
+                continue
+            if col.status not in MIGRATED_STATUSES:
+                explain(row, *column_disposition(col))  # the column is not migrated, whatever the cell holds
+                continue
+            if col.status == "dependent":
+                continue  # per child group below
+            if col.status not in ("address", "contact") and (is_blank(raw) or is_dirty_placeholder(raw)):
+                explain(row, "blank_token", bq, bowner, "placeholder treated as blank (BLANK_TOKENS)")
+                continue
+            if col.status in ("mapped", "duplicate"):
+                out = cell(insert_row, col.target) if insert_row else None
+                compare(row, col, col.target, raw, out)
+            elif col.status == "rule":
+                p = report.rules.params(col.rule)
+                if insert_row and cell(insert_row, p["target"]) == p["value"]:
+                    row["written"] += 1  # consumed by the approved rule
                 else:
                     row["unexplained"] += 1
-            elif not present and out is not None:
-                row["set_by_rule" if col.target in rule_targets else "unexplained"] += 1
-            elif present and isinstance(out, (date, datetime)):
-                is_date_col = True
-                src_date, out_date = to_date(raw), out
-                row["source_date_total"] += _ordinal(src_date)
-                row["written_date_total"] += _ordinal(out_date)
-                if _ordinal(src_date) != _ordinal(out_date):
+            elif col.status in ("address", "contact"):
+                if is_blank(raw):
+                    explain(row, "blank_token", bq, bowner, "placeholder treated as blank (BLANK_TOKENS)")
+                    continue
+                kind = col.status
+                k = child_pos[kind]
+                child_pos[kind] += 1
+                expected[kind] += 1
+                orow = block[k] if k < len(block) else None
+                if kind == "address":
+                    lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+                    want = {ADDR + "LOCATION_TYPE": cfg.ADDRESS_COLUMNS[col.label],
+                            ADDR + "LINE_1": lines[0] if lines else None,
+                            ADDR + "LINE_2": lines[1] if len(lines) > 1 else None,
+                            ADDR + "LINE_3": ", ".join(lines[2:]) or None}
+                else:
+                    loc, ctype = cfg.CONTACT_COLUMNS[col.label]
+                    want = {CONTACT + "LOCATION_TYPE": loc, CONTACT + "CONTACT_TYPE": ctype,
+                            CONTACT + "NUMBER_ADDRESS": _text(raw)}
+                got = {h: (cell(orow, h) if orow else None) for h in want}
+                if all((w is None and g is None) or (w is not None and _same_value(w, g)) for h, w in want.items()
+                       for g in [got[h]]):
+                    row["written"] += 1
+                else:
                     row["unexplained"] += 1
-        if not is_date_col:
-            row["source_date_total"] = row["written_date_total"] = None
+            # dependent columns: per group below
+
+        if r not in held:
+            # Sheet dependents: the k-th group with data is on block row k.
+            k = 0
+            for group in dep_groups:
+                cells = [(c, src_ws.cell(r, c.idx).value) for c in group]
+                if not any(_would_write(c.target, v, layout) for c, v in cells):
+                    for c, v in cells:  # placeholders / unparseable only: no record is created
+                        if _present(v):
+                            row = field_row(c)
+                            if is_blank(v) or is_dirty_placeholder(v):
+                                explain(row, "blank_token", bq, bowner, "placeholder treated as blank (BLANK_TOKENS)")
+                            else:
+                                explain(row, "failed_conversion", "Q24", "Jake", "unparseable date left blank (warned)")
+                    continue
+                orow = block[k] if k < len(block) else None
+                k += 1
+                expected["dependent"] += 1
+                for c, v in cells:
+                    if not _present(v):
+                        continue
+                    row = field_row(c)
+                    if is_blank(v) or is_dirty_placeholder(v):
+                        explain(row, "blank_token", bq, bowner, "placeholder treated as blank (BLANK_TOKENS)")
+                    else:
+                        compare(row, c, c.target, v, cell(orow, c.target) if orow else None)
+            # Keyed dependents (business_rules.json $.dependent_source) follow the sheet dependents.
+            for entry in report.keyed_children.get(r, []):
+                orow = block[k] if k < len(block) else None
+                k += 1
+                expected["dependent"] += 1
+                for header, value in entry["record"].items():
+                    if value is None:
+                        continue
+                    key = ("keyed", entry["sheet"], header)
+                    row = rows_by_col.setdefault(key, {
+                        "col": f"{entry['sheet']} (keyed)", "topia": None, "header": header, "group": "keyed_dependent",
+                        "status": "dependent", "colour": "", "flags": "", "source": 0,
+                        **{cat: 0 for cat in RECON_CATEGORIES}, "set_by_rule": 0, "source_date_total": None,
+                        "written_date_total": None, "q": set(), "owner": set(), "reason": set()})
+                    row["source"] += 1
+                    row["written" if _same_value(value, cell(orow, header) if orow else None) else "unexplained"] += 1
+            expected["spouse"] = int(any(_would_write(c.target, src_ws.cell(r, c.idx).value, layout)
+                                         for c in spouse_cols))
+
+        # Source blank, output populated: only an approved rule may do that.
+        if insert_row:
+            for col in cols:
+                if col.status != "mapped" or _present(src_ws.cell(r, col.idx).value):
+                    continue
+                if cell(insert_row, col.target) is not None:
+                    field_row(col)["set_by_rule" if col.target in rule_targets else "unexplained"] += 1
+
+        written = {kind: sum(1 for orow in (block[:1] if kind == "spouse" else block)
+                             if any(_table(h) in tables and out_ws.cell(orow, c).value is not None
+                                    for h, c in out_headers.items()))
+                   for kind, tables in _CHILD_TABLES.items()}
+        for kind in ("address", "contact", "dependent", "spouse"):
+            rec[f"{kind}_expected"], rec[f"{kind}_written"] = expected[kind], written[kind]
+            if expected[kind] != written[kind]:
+                rec["unexplained"] += abs(expected[kind] - written[kind])
+                rec["notes"].append(f"{kind} records expected {expected[kind]}, written {written[kind]}")
+        if r in held:
+            rec["expected_expansion_rows"] = 0  # nothing of a held row reaches the import workbook
+        else:
+            n_rows = max(1, expected["address"], expected["contact"], expected["dependent"])
+            rec["expected_expansion_rows"] = n_rows - 1
+            found = blocks.get(accepted.get(r)) or []
+            if len(found) != 1:
+                rec["unexplained"] += 1
+                rec["notes"].append(f"{len(found)} INSERT blocks for this Assignment Identifier (expected 1)")
+            elif len(block) != n_rows:
+                rec["unexplained"] += abs(len(block) - n_rows)
+                rec["notes"].append(f"output rows {len(block)}, expected {n_rows}")
+        rec["notes"] = "; ".join(rec["notes"])
+        record_unexplained_total += rec["unexplained"]
+        report.reconciliation_records.append(rec)
+
+    # Field rows: finalise and check that every source cell is in one bucket.
+    field_unexplained = 0
+    unbalanced = []
+    for _, row in sorted(rows_by_col.items(), key=lambda kv: (1, str(kv[0])) if isinstance(kv[0], tuple)
+                         else (0, f"{kv[0]:06d}")):
+        for k in ("q", "owner", "reason"):
+            row[k] = "; ".join(sorted(x for x in row[k] if x))
+        if row["source"] != sum(row[k] for k in RECON_CATEGORIES):
+            unbalanced.append(row["col"])
+        field_unexplained += row["unexplained"]
         report.reconciliation.append(row)
-    report.reconciliation_ok = counts_ok and all(r["unexplained"] == 0 for r in report.reconciliation)
+
+    accepted_n, held_n = len(accepted), len(held)
+    expansion = sum(r["expected_expansion_rows"] for r in report.reconciliation_records)
+    duplicates = sum(len(v) - 1 for v in blocks.values() if len(v) > 1)
+    orphan_blocks = sum(len(v) for k, v in blocks.items() if k not in set(accepted.values()))
+    totals = {cat: sum(r[cat] for r in report.reconciliation) for cat in RECON_CATEGORIES}
+    children = {kind: (sum(r[f"{kind}_expected"] for r in report.reconciliation_records),
+                       sum(r[f"{kind}_written"] for r in report.reconciliation_records))
+                for kind in ("address", "contact", "dependent", "spouse")}
+    employees = {e for _, e in report.row_identity.values() if e is not None}
+    checks = [
+        (report.data_rows == accepted_n + held_n, f"source rows {report.data_rows} != accepted {accepted_n} + held "
+                                                  f"{held_n}"),
+        (insert_count == accepted_n == report.assignments,
+         f"INSERT rows {insert_count}, accepted {accepted_n}, assignments {report.assignments} differ"),
+        (update_count == expansion, f"UPDATE rows {update_count} != expected expansion rows {expansion}"),
+        (report.rows_written == output_rows, f"rows written {report.rows_written} != output rows found {output_rows}"),
+        (not unexpected_rows, f"{len(unexpected_rows)} output row(s) not linked to an accepted assignment"),
+        (not duplicates, f"{duplicates} Assignment Identifier(s) INSERTed more than once"),
+        (not orphan_blocks, f"{orphan_blocks} INSERT block(s) with an identifier of no accepted source row"),
+        (not unbalanced, f"category counts do not add up for column(s) {', '.join(map(str, unbalanced))}"),
+        (all(e == w for e, w in children.values()),
+         "child records expected != written: " + ", ".join(f"{k} {e}/{w}" for k, (e, w) in children.items()
+                                                            if e != w)),
+    ]
+    counts_ok = all(ok for ok, _ in checks)
+    reasons = [msg for ok, msg in checks if not ok]
+    unexplained = field_unexplained + record_unexplained_total + len(unexpected_rows) + duplicates + orphan_blocks
+    if field_unexplained:
+        cols_bad = [f"{r['col']} ({r['header']}) {r['unexplained']}" for r in report.reconciliation if r["unexplained"]]
+        reasons.append(f"{field_unexplained} unexplained source cell(s): " + ", ".join(cols_bad))
+    if record_unexplained_total:
+        reasons.append(f"{record_unexplained_total} unexplained record-level difference(s), see Reconciliation "
+                       "Records")
+    report.reconciliation_ok = counts_ok and unexplained == 0
+    report.reconciliation_summary = {
+        "result": "OK" if report.reconciliation_ok else "FAILED",
+        "source_rows": report.data_rows,
+        "source_employees": len(employees),
+        "source_assignment_identifiers": len({i for i, _ in report.row_identity.values() if i is not None}),
+        "accepted_assignments": accepted_n,
+        "accepted_employees": len({a["employee"] for a in report.accepted if a["employee"] is not None}),
+        "held_rows": held_n,
+        "held_dependent_records": sum(e["groups"] for e in report.dependent_exceptions),
+        "insert_rows": insert_count,
+        "update_rows": update_count,
+        "expected_expansion_rows": expansion,
+        "child_records_expected": {k: e for k, (e, _) in children.items()},
+        "child_records_written": {k: w for k, (_, w) in children.items()},
+        "rows_written": report.rows_written,
+        "unexpected_output_rows": len(unexpected_rows),
+        "duplicate_insert_blocks": duplicates,
+        "source_cells_non_blank": sum(r["source"] for r in report.reconciliation),
+        **{f"cells_{cat}": n for cat, n in totals.items()},
+        "cells_set_by_rule": sum(r["set_by_rule"] for r in report.reconciliation),
+        "record_unexplained": record_unexplained_total,
+        "unexplained_total": unexplained,
+        "counts_balance": counts_ok,
+        "reasons": reasons,
+    }
 
 
 def _ordinal(value: Any) -> int:
@@ -1336,7 +1724,9 @@ def compute_readiness(report: Report) -> Readiness:
 
     if not report.reconciliation_ok:
         q, owner = cfg.READINESS_ITEMS["reconciliation"]
-        add("reconciliation", "Reconciliation", q, owner, "source-to-output reconciliation did not balance")
+        reasons_text = "; ".join(report.reconciliation_summary.get("reasons", []))
+        add("reconciliation", "Reconciliation", q, owner, "source-to-output reconciliation did not balance"
+            + (f": {reasons_text}" if reasons_text else ""))
 
     return Readiness(status=NOT_READY if reasons else READY, reasons=reasons)
 
@@ -1377,13 +1767,11 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
         ws.append([header, value, n, report.allowed(header, value)])
 
     ws = wb.create_sheet("Reconciliation")
-    ws.append(["Source Col", "Row 4 (Topia)", "Equus Header", "Source Non-blank", "Written", "Blank Token",
-               "Failed Conversion", "Set By Rule", "Unexplained", "Source Date Total", "Written Date Total"])
+    ws.append(RECONCILIATION_HEADER)
     for r in report.reconciliation:
-        ws.append([r["col"], r["topia"], r["header"], r["source"], r["written"], r["blank_token"],
-                   r["failed_conversion"], r["set_by_rule"], r["unexplained"],
-                   r["source_date_total"], r["written_date_total"]])
+        ws.append([r.get(k) for k in RECONCILIATION_KEYS])
     ws.append([])
+    summary = report.reconciliation_summary
     for label, value in [("Result", "OK" if report.reconciliation_ok else "FAILED"),
                          ("Source data rows", report.data_rows),
                          ("Assignments (INSERT rows)", report.assignments),
@@ -1391,6 +1779,18 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
                          ("Rows written", report.rows_written),
                          ("Source SHA-256", report.source_sha256)]:
         ws.append([label, value])
+    for key, value in summary.items():
+        if key in ("result", "reasons"):
+            continue
+        ws.append([key, json.dumps(value) if isinstance(value, dict) else value])
+    for reason in summary.get("reasons", []):
+        ws.append(["reason", reason])
+
+    ws = wb.create_sheet("Reconciliation Records")
+    ws.append(RECORDS_HEADER)
+    for r in report.reconciliation_records:
+        ws.append([r.get(k) for k in RECORDS_KEYS])
+        ws.cell(ws.max_row, 2).number_format = "@"
 
     _rules_sheet(wb.create_sheet("Rules"), report)
     _family_sheet(wb.create_sheet("Family"), report)
@@ -1409,6 +1809,31 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     wb.save(buf)
     return buf.getvalue()
 
+
+# The first eleven columns keep the pre-UAT-05 layout of the Reconciliation sheet.
+RECONCILIATION_COLUMNS = [
+    ("Source Col", "col"), ("Row 4 (Topia)", "topia"), ("Equus Header", "header"), ("Source Non-blank", "source"),
+    ("Written", "written"), ("Blank Token", "blank_token"), ("Failed Conversion", "failed_conversion"),
+    ("Set By Rule", "set_by_rule"), ("Unexplained", "unexplained"), ("Source Date Total", "source_date_total"),
+    ("Written Date Total", "written_date_total"), ("Group", "group"), ("Colour", "colour"), ("Flags", "flags"),
+    ("Provisional Conversion", "provisional_conversion"), ("Gated Rule", "gated_rule"), ("Held Row", "held_row"),
+    ("Excluded Colour", "excluded_colour"), ("Pending Target", "pending_target"),
+    ("Replaced By Rule", "replaced_by_rule"), ("Q", "q"), ("Owner", "owner"), ("Reason", "reason"),
+]
+RECONCILIATION_HEADER = [h for h, _ in RECONCILIATION_COLUMNS]
+RECONCILIATION_KEYS = [k for _, k in RECONCILIATION_COLUMNS]
+RECORDS_COLUMNS = [
+    ("Source Row", "source_row"), ("Assignment Identifier", "identifier"), ("Employee Number", "employee"),
+    ("Status", "status"), ("Codes", "codes"), ("Output Rows", "output_rows"), ("INSERT Rows", "insert_rows"),
+    ("UPDATE Rows", "update_rows"), ("Expected Expansion Rows", "expected_expansion_rows"),
+    ("Addresses Expected", "address_expected"), ("Addresses Written", "address_written"),
+    ("Contacts Expected", "contact_expected"), ("Contacts Written", "contact_written"),
+    ("Spouse Expected", "spouse_expected"), ("Spouse Written", "spouse_written"),
+    ("Dependents Expected", "dependent_expected"), ("Dependents Written", "dependent_written"),
+    ("Unexplained", "unexplained"), ("Notes", "notes"),
+]
+RECORDS_HEADER = [h for h, _ in RECORDS_COLUMNS]
+RECORDS_KEYS = [k for _, k in RECORDS_COLUMNS]
 
 RULES_HEADER = ["Rule ID", "Q", "Title", "Status", "Owner", "Approved For Import", "Applied?", "Rows Affected", "Notes"]
 READINESS_HEADER = ["Category", "Item", "Q", "Owner", "Detail"]
