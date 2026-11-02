@@ -150,6 +150,27 @@ COUNTRY_HEADERS = {
     "ASSIGNMENT_MAILING_ADDRESS!COUNTRY_CODE",
 }
 
+# UAT-06 (Q12, BR-12): Equus state header -> the country header of the same
+# record. A state is validated against reference list country_state
+# (country code -> accepted states) only while that list is approved; it is
+# reported, never converted or blanked.
+STATE_COUNTRY_HEADERS = {
+    "ASSIGNMENT!FROM_STATE_PROVINCE": "ASSIGNMENT!FROM_COUNTRY",
+    "ASSIGNMENT!TO_STATE_PROVINCE": "ASSIGNMENT!TO_COUNTRY",
+}
+STATE_LIST_ID = "country_state"
+
+# UAT-06 (BR-17/Q17 overlaps, Q23 start/end semantics): assignment dates are
+# checked per Employee Number. Findings are warnings only; no date is
+# derived, moved or blanked.
+ASSIGNMENT_START_HEADER = "ASSIGNMENT!START_DATE"
+ASSIGNMENT_END_HEADER = "ASSIGNMENT!ACTUAL_END_DATE"
+# Q24 (date formats, OPEN): text dates such as 05/06/2024 are read with the
+# configured month-first order only; when day and month could be swapped the
+# value is reported as ambiguous.
+AMBIGUOUS_DATE_RE = r"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$"
+DATE_ORDER = "month/day/year (MM/DD/YYYY)"
+
 # Equus headers a business rule may fill when the mapped source cell is blank
 # are derived from the approved rules (BusinessRules.applied_targets()), so
 # reconciliation only treats them as explained when the rule was applied.
@@ -225,6 +246,13 @@ DEPENDENT_HOLDS = {
     # its keyed dependents are held with it until the corrected re-run.
     "HELD_DEPENDENTS_ASSIGNMENT_HELD": ("Q18", "Alka / Topia (assignment row correction)",
                                         "the assignment row with this Assignment ID is held; dependents held with it"),
+    # UAT-06 (Q5: Equus does not reliably prevent duplicates; Q19): a dependent
+    # record whose every field equals an earlier dependent record of the same
+    # assignment is held for review (twins or a repeated record), never written
+    # twice and never silently dropped.
+    "HELD_DEPENDENTS_DUPLICATE": ("Q5/Q19", "Alka / Topia (dependent data review)",
+                                  "dependent record identical to an earlier dependent record of the same assignment; "
+                                  "the first is written, the repeat is held"),
 }
 
 # Optional Equus dropdown lists, {"EQUUS!HEADER": ["Value", ...]}, bundled

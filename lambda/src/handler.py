@@ -368,8 +368,10 @@ def _process(bucket: str, key: str, template: bytes, template_info: dict, dest_b
     report_key = f"{dest_prefix}reports/{stem}_MAPPING_REPORT_{stamp}.xlsx"
     manifest_key = f"{dest_prefix}reports/{stem}_RUN_{stamp}.json"
     source_ref = f"s3://{bucket}/{key}"
+    # Done = an import workbook *and* the run manifest exist (UAT-06: an
+    # import workbook whose manifest write failed is completed on retry).
     done = next((k for k in (ready_key, draft_key) if _exists(dest_bucket, k)), None)
-    if done:
+    if done and _exists(dest_bucket, manifest_key):
         log.info("Skipping %s: already processed as %s", source_ref, done)
         return {"source": source_ref, "skipped": "already processed"}
 
@@ -459,13 +461,20 @@ def _process(bucket: str, key: str, template: bytes, template_info: dict, dest_b
         fail(FAIL_RECONCILIATION, f"Reconciliation failed for {source_ref}; see s3://{dest_bucket}/{failed_key}",
              report=report, report_written=failed_key)
 
-    if not _put_once(dest_bucket, out_key, output, meta):
-        log.info("Skipping %s: concurrent duplicate already wrote %s", source_ref, out_key)
-        return {"source": source_ref, "skipped": "already processed"}
+    # Write order report -> import workbook -> manifest (UAT-06 fix): a put
+    # failure never leaves an import workbook without its mapping report, and
+    # the run counts as done only once the manifest exists (see `done` above),
+    # so a Lambda retry after a failed put completes the missing objects
+    # instead of skipping them. Every put is conditional: nothing is
+    # overwritten or written twice.
     _put_once(dest_bucket, report_key, report_bytes, meta)
+    wrote_output = _put_once(dest_bucket, out_key, output, meta)
     manifest["run"].update(status="SUCCEEDED", finished_at=_now())
     manifest["output"] = _output_section(out_key, ready, report_key)
-    _put_once(dest_bucket, manifest_key, _manifest_bytes(manifest), meta, JSON_CONTENT_TYPE)
+    wrote_manifest = _put_once(dest_bucket, manifest_key, _manifest_bytes(manifest), meta, JSON_CONTENT_TYPE)
+    if not wrote_output and not wrote_manifest:
+        log.info("Skipping %s: concurrent duplicate already wrote %s", source_ref, out_key)
+        return {"source": source_ref, "skipped": "already processed"}
 
     counts = manifest["counts"]
     summary = {

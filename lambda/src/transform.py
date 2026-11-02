@@ -147,12 +147,14 @@ class Report:
     reconciliation_records: list[dict] = field(default_factory=list)  # one row per source data row
     reconciliation_summary: dict = field(default_factory=dict)
     keyed_children: dict = field(default_factory=dict)  # source row -> [{"sheet", "row", "record"}] attached
+    duplicate_dependent_groups: dict = field(default_factory=dict)  # source row -> {sheet group index} held (UAT-06)
     # Configuration in force and what the rules did.
     rules: Any = None  # mapping_config.BusinessRules
     reference_data: dict = field(default_factory=dict)  # list id -> mapping_config.ReferenceList
     rule_rows: dict = field(default_factory=lambda: defaultdict(set))  # rule id -> source rows affected
     provisional: Counter = field(default_factory=Counter)  # (header, source text, converted) -> n
     reference_values: Counter = field(default_factory=Counter)  # (list id, header, value) -> n
+    state_values: Counter = field(default_factory=Counter)  # (state header, country code, state) -> n (Q12)
     config_issues: list[tuple[str, str]] = field(default_factory=list)  # (config path, message)
     current_row: Any = None
     readiness: Readiness | None = None
@@ -230,6 +232,14 @@ class Report:
             return f"not in list (no Equus list; {cfg.FAMILY_LIST_OWNER[0]} pending)"
         return "in list" if self.allowed(header, value) == "yes" else "not in list"
 
+    def state_in_list(self, country: Any, state: str) -> bool | None:
+        """Q12: True/False against the approved country_state list; None
+        while the list is not usable (nothing can be validated)."""
+        lst = self.reference_data.get(cfg.STATE_LIST_ID)
+        if lst is None or not lst.usable:
+            return None
+        return state in lst.values.get(str(country), ()) if country else False
+
     def hold_dependents(self, code: str, sheet: str, rows: list, groups: int, detail: str = "") -> None:
         q, owner, meaning = cfg.DEPENDENT_HOLDS[code]
         entry = {"code": code, "sheet": sheet, "rows": len(rows), "groups": groups, "q": q, "owner": owner,
@@ -257,6 +267,10 @@ class Report:
             lst = self.reference_data.get(list_id)
             if lst is not None and lst.usable and value not in lst.values:
                 self.warn("all rows", header, f"{value!r} ({n}x) not in approved reference list {list_id} ({lst.q})")
+        for (header, country, state), n in sorted(self.state_values.items(), key=str):
+            if self.state_in_list(country, state) is False:
+                self.warn("all rows", header, f"state {state!r} ({n}x) not in approved reference list "
+                                              f"{cfg.STATE_LIST_ID} for country {country!r} (Q12); sent unchanged")
 
 
 # --------------------------------------------------------------------------- layout
@@ -324,6 +338,12 @@ def check_configuration(layout: TargetLayout, report: Report) -> None:
         if header not in layout.headers:
             msg = f"{rules.file_name} {path}: {header} not in Equus template"
             report.config_issues.append((path, msg))
+            report.warn("configuration", header, msg)
+    checked = [*cfg.STATE_COUNTRY_HEADERS.items(), (cfg.ASSIGNMENT_START_HEADER, cfg.ASSIGNMENT_END_HEADER)]
+    for header in sorted({h for pair in checked for h in pair}):
+        if header not in layout.headers:
+            msg = f"mapping_config (UAT-06 checks): {header} not in Equus template"
+            report.config_issues.append(("mapping_config", msg))
             report.warn("configuration", header, msg)
     for lst in report.reference_data.values():
         for pattern in lst.applies_to:
@@ -481,6 +501,13 @@ def _convert(header: str, value: Any, layout: TargetLayout, report: Report, row:
         parsed = to_date(value)
         if parsed is None:
             report.warn(row, header, f"unparseable date {value!r}; left blank")
+        elif isinstance(value, str):
+            m = re.match(cfg.AMBIGUOUS_DATE_RE, value)
+            if m and int(m.group(1)) <= 12 and int(m.group(2)) <= 12 and m.group(1) != m.group(2):
+                # UAT-06 (Q24 open): read only with the configured order, reported.
+                report.warn(row, header, f"ambiguous date text {value!r} read as {cfg.DATE_ORDER} "
+                                         f"(configured order) = {parsed.isoformat()}; day and month could be "
+                                         "swapped, verify (Q24 pending)")
         return parsed
 
     if layout.is_country(header):
@@ -956,6 +983,36 @@ def read_dependent_sources(src_wb, layout: TargetLayout, report: Report) -> dict
     return index
 
 
+def _dependent_signature(rec: dict) -> tuple:
+    """Comparable form of one dependent record (populated fields only)."""
+    return tuple(sorted((k, _canonical(v)) for k, v in rec.items() if v is not None))
+
+
+def check_assignment_dates(entries: list[tuple], report: Report) -> None:
+    """UAT-06 (BR-17/Q17, Q23): warn on a missing start date, an end date
+    before its start date and assignments of one Employee Number whose date
+    ranges overlap (a missing end date = open-ended). Warnings only: no date
+    is derived, moved or blanked and no row is held."""
+    start_h, end_h = cfg.ASSIGNMENT_START_HEADER, cfg.ASSIGNMENT_END_HEADER
+    by_employee: dict = defaultdict(list)
+    for r, employee, start, end in entries:
+        if not start:
+            report.warn(f"source row {r}", start_h, "no assignment start date; left blank, nothing derived (Q23 pending)")
+            continue
+        if end and _ordinal(end) < _ordinal(start):
+            report.warn(f"source row {r}", end_h, "end date before start date; both kept unchanged, verify (Q23 pending)")
+        by_employee[employee].append((_ordinal(start), _ordinal(end) if end else None, r))
+    for spans in by_employee.values():
+        spans.sort()
+        for i, (s1, e1, r1) in enumerate(spans):
+            for s2, _e2, r2 in spans[i + 1:]:
+                if e1 is None or s2 <= e1:
+                    report.warn(f"source row {r2}", start_h,
+                                f"assignment dates overlap source row {r1} of the same Employee Number"
+                                f"{' (open-ended)' if e1 is None else ''}; dates kept unchanged, verify "
+                                "(BR-17/Q17, Q23 pending)")
+
+
 def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report: Report,
                   keyed_dependents: dict[str, list[dict]] | None = None) -> list[dict]:
     mapped = [c for c in cols if c.status == "mapped"]
@@ -979,6 +1036,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
     id_counts: Counter = Counter(ident for ident, _ in report.row_identity.values()
                                  if ident is not None) if keyed_dependents else Counter()
     consumed: set = set()
+    assignment_dates: list[tuple] = []  # (source row, employee, start, end) of accepted rows
 
     for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1):
         raw = {c.idx: src_ws.cell(r, c.idx).value for c in cols}
@@ -1011,6 +1069,11 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
                 report.rule_hit(col.rule)
         start = main.get(start_header)
         validate_record(main, report, row_ref)
+        for state_h, country_h in cfg.STATE_COUNTRY_HEADERS.items():
+            if main.get(state_h) is not None:
+                report.state_values[(state_h, main.get(country_h), str(main[state_h]))] += 1
+        assignment_dates.append((r, employee, main.get(cfg.ASSIGNMENT_START_HEADER),
+                                 main.get(cfg.ASSIGNMENT_END_HEADER)))
 
         # Child records
         addr_recs = []
@@ -1046,13 +1109,32 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             contact_recs.append(rec)
 
         dep_recs = []
-        for group in dependents:
+        seen_deps: set = set()
+        duplicates = 0
+        for gi, group in enumerate(dependents):
             rec = {c.target: convert(c.target, raw[c.idx], layout, report, f"source {c.letter}{r}") for c in group}
             if any(v is not None for v in rec.values()):
+                sig = _dependent_signature(rec)
+                if sig in seen_deps:  # UAT-06: repeated record held, never written twice
+                    report.duplicate_dependent_groups.setdefault(r, set()).add(gi)
+                    duplicates += 1
+                    continue
+                seen_deps.add(sig)
                 validate_family(rec, cfg.FAMILY_PREFIXES[1], report, row_ref)
                 dep_recs.append(rec)
-        dep_recs.extend(_attach_keyed_dependents(join_key, employee, keyed_dependents, id_counts, consumed,
-                                                 bool(dep_recs), report, row_ref))
+        for rec in _attach_keyed_dependents(join_key, employee, keyed_dependents, id_counts, consumed,
+                                            bool(dep_recs), report, row_ref):
+            sig = _dependent_signature(rec)
+            if sig in seen_deps:
+                report.keyed_children[r] = [e for e in report.keyed_children.get(r, []) if e["record"] is not rec]
+                report.dependents_attached -= 1
+                duplicates += 1
+                continue
+            seen_deps.add(sig)
+            dep_recs.append(rec)
+        if duplicates:
+            report.hold_dependents("HELD_DEPENDENTS_DUPLICATE", cfg.SOURCE_SHEET, [f"source row {r}"], duplicates,
+                                   f"assignment at {row_ref}")
 
         # Equus layout: first row INSERTs the assignment; extra child records
         # go on UPDATE rows keyed by the Assignment Identifier.
@@ -1074,6 +1156,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         seen_employees.add(employee)
         report.assignments += 1
     report.current_row = None
+    check_assignment_dates(assignment_dates, report)
 
     unmatched = [e for key, entries in keyed_dependents.items() if key not in consumed for e in entries]
     if unmatched:
@@ -1468,8 +1551,16 @@ def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -
         if r not in held:
             # Sheet dependents: the k-th group with data is on block row k.
             k = 0
-            for group in dep_groups:
+            held_groups = report.duplicate_dependent_groups.get(r, set())
+            for gi, group in enumerate(dep_groups):
                 cells = [(c, src_ws.cell(r, c.idx).value) for c in group]
+                if gi in held_groups:  # UAT-06: repeated dependent record held, no output row
+                    q, owner, _ = cfg.DEPENDENT_HOLDS["HELD_DEPENDENTS_DUPLICATE"]
+                    for c, v in cells:
+                        if _present(v):
+                            explain(field_row(c), "held_row", q, owner,
+                                    "dependent record held: HELD_DEPENDENTS_DUPLICATE")
+                    continue
                 if not any(_would_write(c.target, v, layout) for c, v in cells):
                     for c, v in cells:  # placeholders / unparseable only: no record is created
                         if _present(v):
@@ -1678,6 +1769,21 @@ def compute_readiness(report: Report) -> Readiness:
         elif unknown[list_id]:
             add("reference_value_unknown", list_id, lst.q, lst.owner,
                 f"{len(unknown[list_id])} distinct value(s) in {headers} not in the approved list")
+
+    if report.state_values:  # UAT-06, Q12: states against the country_state list
+        lst = report.reference_data.get(cfg.STATE_LIST_ID)
+        q, owner = (lst.q, lst.owner) if lst is not None else ("Q12", "Jake (Equus)")
+        states = {(h, c, s) for (h, c, s) in report.state_values}
+        headers = ", ".join(sorted({h for h, _, _ in states}))
+        bad = [k for k in states if report.state_in_list(k[1], k[2]) is False]
+        if lst is None or not lst.usable:
+            add("reference_list_unavailable", f"{cfg.STATE_LIST_ID} (state)", q, owner,
+                f"list {lst.state if lst is not None else 'not configured'}: {len(states)} distinct state value(s) "
+                f"in {headers} cannot be validated; sent unchanged")
+        elif bad:
+            add("reference_value_unknown", f"{cfg.STATE_LIST_ID} (state)", q, owner,
+                f"{len(bad)} distinct state value(s) in {headers} not in the approved list for their country; "
+                "sent unchanged")
 
     if report.unmapped_resources:
         lst = report.reference_data.get(cfg.RESOURCE_LIST_ID)
