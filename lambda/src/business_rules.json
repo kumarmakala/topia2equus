@@ -1,8 +1,25 @@
 {
   "description": "Business rules of the Topia -> Equus EAFH transformation. A rule changes import output only while approved_for_import is true; a Jake answer is evidence, not approval (every tracker Status in clarifications/jake-1.xlsx column I is Open). Validated strictly by mapping_config.load_business_rules().",
-  "version": "1.0.0",
-  "effective_version": "1.0.0",
+  "version": "1.1.0",
+  "effective_version": "1.1.0",
   "generated_at": "2026-11-02",
+  "dependent_source": {
+    "Q": "Q11/Q18",
+    "status": "partially_clarified",
+    "approved_for_import": false,
+    "owner": "Alka / Topia (keyed dependent extract, D3); Jake (Equus layout)",
+    "notes": "Q11/Q18/Q19 (Jake): dependents go in the same import, linked to their assignment by the Assignment Identifier. The Topia 'Dependent Import' sheet has no Employee/Assignment key (assessment D3), so no keyed sheet is configured (sheet null) and any dependent sheet without key columns is reported HELD_DEPENDENTS_UNKEYED. Set sheet, the row numbers and the key column labels once Topia delivers a keyed extract, then approved_for_import after review. The join is by Assignment ID only, never by Employee Number.",
+    "parameters": {
+      "sheet": null,
+      "header_row": 1,
+      "data_start_row": 2,
+      "key_columns": {
+        "employee": "employee id",
+        "assignment": "assignment id"
+      },
+      "child_groups": "repeated_column_groups"
+    }
+  },
   "rules": [
     {
       "id": "international_relo_derivation",

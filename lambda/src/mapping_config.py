@@ -180,8 +180,46 @@ CODE_NAME_PAIRS = [
 ]
 COST_CENTER_CODE_RE = r"^[\w-]+_[A-Z]VC$"  # every code in the sample ends _NVC / _DVC
 
-# Family records need a name to be imported as a person.
+# Family record tables: spouse/partner (one per assignment, on the INSERT
+# row) and dependents (one per row, any number; Q19 ' Mny dependents Ex').
 FAMILY_PREFIXES = ("SPOUSE_DOMESTIC_PARTNER", "ASSIGNMENT_DEPENDENT")
+# Q10 / Q20 (Jake, jake-1.xlsx 'datamapping clarrification shef' J11, J21):
+# a spouse/partner or dependent without names is importable and one populated
+# field creates a record. Missing names are a DATA_QUALITY note for business
+# review, never a hold, a drop or an invented name.
+FAMILY_NAME_FIELDS = ("FIRST_NAME", "LAST_NAME")
+FAMILY_NAME_NOTE = "record has no first/last name; importable per Q10/Q20, business review recommended"
+# Family dropdowns whose values are checked against the Equus lists
+# (ALLOWED_VALUES_FILE) and never converted. Q14 / Q20: lists still to be
+# provided by Jake, so without a list every value is reported "not in list".
+FAMILY_LIST_HEADERS = (
+    "SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP",
+    "ASSIGNMENT_DEPENDENT!RELATIONSHIP",
+)
+FAMILY_LIST_OWNER = ("Q14", "Jake (Equus lists)")
+
+# Dependent exceptions: code -> (Q, owner, meaning). Held dependents are
+# never attached to an assignment.
+DEPENDENT_HOLDS = {
+    "HELD_DEPENDENTS_UNKEYED": ("Q11", "Alka / Topia (keyed dependent extract, D3)",
+                                "dependent sheet has no Employee ID + Assignment ID key columns; nothing attached"),
+    "HELD_DEPENDENTS_NOT_CONFIGURED": ("Q11", "Alka / Topia (keyed dependent extract, D3)",
+                                       "keyed dependent sheet is not the configured dependent_source.sheet; "
+                                       "nothing attached"),
+    "HELD_DEPENDENTS_GATED": ("Q11", "Alka / Topia (keyed dependent extract, D3)",
+                              "dependent_source is not approved_for_import; nothing attached"),
+    "HELD_DEPENDENTS_SHEET_MISSING": ("Q11", "Alka / Topia (keyed dependent extract, D3)",
+                                      "configured dependent_source.sheet not found in the source workbook"),
+    "HELD_DEPENDENTS_NO_ASSIGNMENT_ID": ("Q18", "Alka / Topia (keyed dependent extract)",
+                                         "dependent row has no Assignment ID; never linked by Employee Number"),
+    "HELD_DEPENDENTS_UNMATCHED": ("Q18", "Alka / Topia (keyed dependent extract)",
+                                  "Assignment ID not found among the assignments of this file"),
+    "HELD_DEPENDENTS_EMPLOYEE_MISMATCH": ("Q18", "Alka / Topia (keyed dependent extract)",
+                                          "Employee ID differs from the Employee Number of the matched assignment"),
+    "HELD_DEPENDENTS_AMBIGUOUS": ("Q1/Q18", "Jake (Equus) / Alka, John (Topia column)",
+                                  "Assignment ID occurs on more than one assignment row (or the row has no own "
+                                  "Assignment ID); dependents not attached"),
+}
 
 # Optional Equus dropdown lists, {"EQUUS!HEADER": ["Value", ...]}, bundled
 # next to this file when Equus supplies them (Q14). A missing file or a
@@ -419,7 +457,7 @@ RULE_PARAMETERS = {
 
 _META_CHECKS = (("version", _text), ("effective_version", _text), ("generated_at", _iso_timestamp))
 _TOP_REQUIRED = ("version", "effective_version", "generated_at", "rules")
-_TOP_OPTIONAL = ("description",)
+_TOP_OPTIONAL = ("description", "dependent_source")
 _RULE_REQUIRED = ("id", "Q", "title", "status", "approved_for_import", "owner", "parameters")
 _RULE_OPTIONAL = ("notes", "approval_reference")
 
@@ -497,12 +535,91 @@ class BusinessRule:
 
 
 @dataclass(frozen=True)
+class DependentSource:
+    """Keyed Topia dependent sheet (Q11/Q18/Q19). Dependents are attached
+    only while `sheet` is set and approved_for_import is true, and only by
+    Assignment ID (never by Employee Number alone). `version` is the version
+    of the business_rules.json that declares the section."""
+    version: str
+    q: str
+    status: str
+    approved_for_import: bool
+    owner: str
+    sheet: str | None
+    header_row: int
+    data_start_row: int
+    employee_label: str
+    assignment_label: str
+    child_groups: str
+    notes: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return self.sheet is not None
+
+    @property
+    def enabled(self) -> bool:
+        return self.configured and self.approved_for_import
+
+
+DEPENDENT_CHILD_GROUPS = ("repeated_column_groups",)
+_DEP_REQUIRED = ("Q", "status", "approved_for_import", "owner", "parameters")
+_DEP_OPTIONAL = ("notes", "approval_reference")
+_DEP_PARAMS = ("sheet", "header_row", "data_start_row", "key_columns", "child_groups")
+
+
+def _positive_int(v, sub=""):
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        raise _Invalid(sub, "must be a positive integer (worksheet row number)")
+
+
+def _load_dependent_source(raw, source, version: str) -> DependentSource:
+    p = "$.dependent_source"
+    _check_object(raw, p, source, _DEP_REQUIRED, _DEP_OPTIONAL)
+    _run(_q_number, raw["Q"], source, f"{p}.Q")
+    _run(_status, raw["status"], source, f"{p}.status")
+    _run(_boolean, raw["approved_for_import"], source, f"{p}.approved_for_import")
+    _run(_text, raw["owner"], source, f"{p}.owner")
+    for key in _DEP_OPTIONAL:
+        if key in raw:
+            _run(_text, raw[key], source, f"{p}.{key}")
+    params = raw["parameters"]
+    pp = f"{p}.parameters"
+    _check_object(params, pp, source, _DEP_PARAMS, ())
+    if params["sheet"] is not None:
+        _run(_text, params["sheet"], source, f"{pp}.sheet")
+        if params["sheet"] == SOURCE_SHEET:
+            raise ConfigurationError(source, f"{pp}.sheet", "must not be the assignment sheet SOURCE_SHEET")
+    _run(_positive_int, params["header_row"], source, f"{pp}.header_row")
+    _run(_positive_int, params["data_start_row"], source, f"{pp}.data_start_row")
+    if params["data_start_row"] <= params["header_row"]:
+        raise ConfigurationError(source, f"{pp}.data_start_row", "must be greater than header_row")
+    keys = params["key_columns"]
+    _check_object(keys, f"{pp}.key_columns", source, ("employee", "assignment"), ())
+    _run(_label, keys["employee"], source, f"{pp}.key_columns.employee")
+    _run(_label, keys["assignment"], source, f"{pp}.key_columns.assignment")
+    if keys["employee"] == keys["assignment"]:
+        raise ConfigurationError(source, f"{pp}.key_columns",
+                                 "employee and assignment key columns must differ (Assignment ID is the join key)")
+    _run(_one_of(*DEPENDENT_CHILD_GROUPS), params["child_groups"], source, f"{pp}.child_groups")
+    if raw["approved_for_import"] and params["sheet"] is None:
+        raise ConfigurationError(source, f"{p}.approved_for_import",
+                                 "cannot be true while parameters.sheet is null")
+    return DependentSource(
+        version=version, q=raw["Q"], status=raw["status"], approved_for_import=raw["approved_for_import"],
+        owner=raw["owner"], sheet=params["sheet"], header_row=params["header_row"],
+        data_start_row=params["data_start_row"], employee_label=keys["employee"],
+        assignment_label=keys["assignment"], child_groups=params["child_groups"], notes=raw.get("notes", ""))
+
+
+@dataclass(frozen=True)
 class BusinessRules:
     source: str
     version: str
     effective_version: str
     generated_at: str
     rules: dict  # rule id -> BusinessRule, in file order
+    dependent_source: DependentSource | None = None  # None = section absent (no keyed source)
 
     @property
     def file_name(self) -> str:
@@ -583,8 +700,9 @@ def load_business_rules(path=None) -> BusinessRules:
     if missing:
         raise ConfigurationError(source, "$.rules", f"missing rule(s) {', '.join(missing)}: every rule the "
                                                     "engine implements must be declared with its approval status")
+    dep = _load_dependent_source(data["dependent_source"], source, data["version"]) if "dependent_source" in data else None
     return BusinessRules(source=str(source), version=data["version"], effective_version=data["effective_version"],
-                         generated_at=data["generated_at"], rules=rules)
+                         generated_at=data["generated_at"], rules=rules, dependent_source=dep)
 
 
 # --------------------------------------------------------------------------- reference data
@@ -718,4 +836,6 @@ def rule_enabled(rule_id: str, rules: BusinessRules | None = None) -> bool:
 VALUE_MAPS = BUSINESS_RULES.params(RULE_VALUE_MAPS)["maps"]
 CANCELLATION_REASON_LABEL = BUSINESS_RULES.params(RULE_CANCELLATION_PHASE)["source_label"]
 CANCELLED_PHASE = BUSINESS_RULES.params(RULE_CANCELLATION_PHASE)["value"]
+# Keyed dependent source in force (business_rules.json $.dependent_source).
+DEPENDENT_SOURCE = BUSINESS_RULES.dependent_source
 RESOURCE_MAP = dict(REFERENCE_DATA[RESOURCE_LIST_ID].values) if REFERENCE_DATA[RESOURCE_LIST_ID].usable else {}

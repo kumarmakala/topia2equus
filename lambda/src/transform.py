@@ -137,6 +137,12 @@ class Report:
     missing_employee_numbers: int = 0
     current_row: Any = None
     readiness: Readiness | None = None
+    # Spouse / dependent records (Q10, Q11, Q18, Q19, Q20).
+    data_quality: list[dict] = field(default_factory=list)  # where, record, fields, missing
+    family_values: Counter = field(default_factory=Counter)  # (header, value) -> n
+    dependent_exceptions: list[dict] = field(default_factory=list)  # code, sheet, rows, groups, q, owner, detail
+    dependents_attached: int = 0  # child records attached from the keyed dependent source
+    dependent_overlaps: int = 0  # assignments with dependents from the main sheet and the keyed source
 
     @property
     def business_rules_version(self) -> str:
@@ -170,8 +176,30 @@ class Report:
             return "no list"
         return "yes" if str(value).lower() in self.allowed_values[header] else "NO"
 
+    def family_value_status(self, header: str, value: Any) -> str:
+        """Q14: a family dropdown value is checked against the Equus list when
+        one is bundled; without a list it is 'not in list' (never converted)."""
+        if header not in self.allowed_values:
+            return f"not in list (no Equus list; {cfg.FAMILY_LIST_OWNER[0]} pending)"
+        return "in list" if self.allowed(header, value) == "yes" else "not in list"
+
+    def hold_dependents(self, code: str, sheet: str, rows: list, groups: int, detail: str = "") -> None:
+        q, owner, meaning = cfg.DEPENDENT_HOLDS[code]
+        entry = {"code": code, "sheet": sheet, "rows": len(rows), "groups": groups, "q": q, "owner": owner,
+                 "detail": meaning + (f"; {detail}" if detail else ""),
+                 "source_rows": ", ".join(str(r) for r in rows)}
+        self.dependent_exceptions.append(entry)
+        self.warn(f"sheet {sheet!r}", cfg.FAMILY_PREFIXES[1],
+                  f"{code}: {len(rows)} dependent row(s), {groups} dependent record(s) held ({q}, owner {owner}); "
+                  f"{entry['detail']}")
+
     def summarise_values(self) -> None:
         """One warning per distinct unmapped resource / disallowed dropdown value."""
+        for (header, value), n in sorted(self.family_values.items(), key=str):
+            status = self.family_value_status(header, value)
+            if status != "in list":
+                self.warn("all rows", header, f"{value!r} ({n}x) {status}; sent unchanged, never converted "
+                                              f"({cfg.FAMILY_LIST_OWNER[0]}, owner {cfg.FAMILY_LIST_OWNER[1]})")
         for (header, value), n in sorted(self.unmapped_resources.items(), key=str):
             self.warn("all rows", header, f"{value!r} ({n}x) not in RESOURCE_MAP "
                                           f"(reference_data/{cfg.RESOURCE_LIST_ID}.json); Equus expects a username")
@@ -453,10 +481,22 @@ def validate_record(main: dict, report: Report, row_ref: str) -> None:
 
 
 def validate_family(rec: dict, prefix: str, report: Report, row_ref: str) -> None:
+    """Q10 / Q20: a spouse/partner or dependent record with at least one
+    populated field is written as it is. Missing names are a DATA_QUALITY
+    note for business review (never a hold, a drop or an invented name);
+    relationship values are counted for the Equus list check (Q14)."""
     values = {k: v for k, v in rec.items() if k.split("!")[0] in (prefix, prefix + "_CF") and v is not None}
-    if values and not (values.get(prefix + "!FIRST_NAME") and values.get(prefix + "!LAST_NAME")):
-        report.warn(row_ref, prefix, f"record has {', '.join(sorted(k.split('!')[1] for k in values))} "
-                                     "but no first/last name; Equus may reject or create an unnamed person")
+    if not values:
+        return
+    for header in cfg.FAMILY_LIST_HEADERS:
+        if header in values:
+            report.family_values[(header, str(values[header]))] += 1
+    missing = [f for f in cfg.FAMILY_NAME_FIELDS if not values.get(f"{prefix}!{f}")]
+    if missing:
+        fields = ", ".join(sorted(k.split("!")[1] for k in values))
+        report.data_quality.append({"where": row_ref, "record": prefix, "fields": fields,
+                                    "missing": ", ".join(missing)})
+        report.warn(row_ref, prefix, f"DATA_QUALITY: {cfg.FAMILY_NAME_NOTE} (has {fields}; missing {', '.join(missing)})")
 
 
 # --------------------------------------------------------------------------- rules
@@ -519,7 +559,124 @@ def _group_dependents(cols: list[SourceColumn]) -> list[list[SourceColumn]]:
     return groups
 
 
-def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report: Report) -> list[dict]:
+def _key_text(value: Any) -> str | None:
+    """Join-key text of an identifier cell; leading zeros are kept (never guessed)."""
+    if is_blank(value):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip()
+
+
+def _dependent_columns(ws, row: int) -> list[SourceColumn]:
+    """ASSIGNMENT_DEPENDENT* technical keys in one header row of a sheet."""
+    cols = []
+    for c in range(1, ws.max_column + 1):
+        raw = ws.cell(row, c).value
+        key = norm_key(raw)
+        if key and key.startswith(cfg.FAMILY_PREFIXES[1]):
+            cols.append(SourceColumn(idx=c, key=raw, ui=None, topia=None, status="dependent", target=key))
+    return cols
+
+
+def _find_labels(ws, last_row: int, labels: tuple[str, ...]) -> dict[str, int]:
+    """Column of each normalised label within header rows 1..last_row."""
+    found: dict[str, int] = {}
+    for r in range(1, last_row + 1):
+        for c in range(1, ws.max_column + 1):
+            label = norm_label(ws.cell(r, c).value)
+            if label in labels and label not in found:
+                found[label] = c
+    return found
+
+
+def _dependent_rows(ws, groups: list[list[SourceColumn]], first_row: int) -> list[tuple[int, int]]:
+    """(row, populated child groups) for every row holding dependent data."""
+    out = []
+    for r in range(first_row, ws.max_row + 1):
+        n = sum(1 for g in groups if any(not is_blank(ws.cell(r, c.idx).value) for c in g))
+        if n:
+            out.append((r, n))
+    return out
+
+
+def read_dependent_sources(src_wb, layout: TargetLayout, report: Report) -> dict[str, list[dict]]:
+    """Dependents of the keyed Topia source (business_rules.json
+    $.dependent_source), indexed by Assignment ID key text.
+
+    Every other sheet with ASSIGNMENT_DEPENDENT columns is scanned: without
+    Employee ID + Assignment ID key columns it is HELD_DEPENDENTS_UNKEYED
+    (assessment D3, e.g. Topia 'Dependent Import'), with them but not
+    configured it is HELD_DEPENDENTS_NOT_CONFIGURED. Held dependents are
+    counted, reported and never attached."""
+    dep = report.rules.dependent_source
+    key_labels = (dep.employee_label, dep.assignment_label) if dep is not None else ("employee id", "assignment id")
+    index: dict[str, list[dict]] = defaultdict(list)
+
+    for name in src_wb.sheetnames:
+        if name == cfg.SOURCE_SHEET or (dep is not None and name == dep.sheet):
+            continue
+        ws = src_wb[name]
+        header_row = next((r for r in range(1, min(ws.max_row, 10) + 1) if _dependent_columns(ws, r)), None)
+        if header_row is None:
+            continue
+        groups = _group_dependents(_dependent_columns(ws, header_row))
+        found = _dependent_rows(ws, groups, header_row + 1)
+        if not found:
+            continue
+        keys = _find_labels(ws, header_row, key_labels)
+        code = "HELD_DEPENDENTS_NOT_CONFIGURED" if len(keys) == 2 else "HELD_DEPENDENTS_UNKEYED"
+        report.hold_dependents(code, name, [f"row {r}" for r, _ in found], sum(n for _, n in found),
+                               f"dependent columns in header row {header_row}")
+
+    if dep is None or not dep.configured:
+        return index
+    if dep.sheet not in src_wb.sheetnames:
+        report.hold_dependents("HELD_DEPENDENTS_SHEET_MISSING", dep.sheet, [], 0)
+        return index
+    ws = src_wb[dep.sheet]
+    groups = _group_dependents(_dependent_columns(ws, dep.header_row))
+    if not groups:
+        msg = f"dependent_source.sheet {dep.sheet!r} has no ASSIGNMENT_DEPENDENT columns in header_row {dep.header_row}"
+        report.config_issues.append(("$.dependent_source.parameters.header_row", msg))
+        report.warn("configuration", cfg.FAMILY_PREFIXES[1], msg)
+        return index
+    found = _dependent_rows(ws, groups, dep.data_start_row)
+    keys = _find_labels(ws, dep.data_start_row - 1, key_labels)
+    if len(keys) < 2:
+        if found:
+            missing = ", ".join(lbl for lbl in key_labels if lbl not in keys)
+            report.hold_dependents("HELD_DEPENDENTS_UNKEYED", dep.sheet, [f"row {r}" for r, _ in found],
+                                   sum(n for _, n in found), f"key column(s) not found: {missing}")
+        return index
+    if not dep.approved_for_import:
+        if found:
+            report.hold_dependents("HELD_DEPENDENTS_GATED", dep.sheet, [f"row {r}" for r, _ in found],
+                                   sum(n for _, n in found), f"status {dep.status} ({dep.q}, owner {dep.owner})")
+        return index
+
+    emp_c, asg_c = keys[dep.employee_label], keys[dep.assignment_label]
+    no_id: list[tuple[int, int]] = []
+    for r, n in found:
+        assignment = _key_text(ws.cell(r, asg_c).value)
+        if assignment is None:
+            no_id.append((r, n))
+            continue
+        recs = []
+        for group in groups:
+            rec = {c.target: convert(c.target, ws.cell(r, c.idx).value, layout, report, f"{dep.sheet}!{c.letter}{r}")
+                   for c in group}
+            if any(v is not None for v in rec.values()):
+                recs.append(rec)
+        index[assignment].append({"row": r, "employee": _key_text(ws.cell(r, emp_c).value), "records": recs})
+    if no_id:
+        report.hold_dependents("HELD_DEPENDENTS_NO_ASSIGNMENT_ID", dep.sheet, [f"row {r}" for r, _ in no_id],
+                               sum(n for _, n in no_id))
+    return index
+
+
+def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report: Report,
+                  keyed_dependents: dict[str, list[dict]] | None = None) -> list[dict]:
     mapped = [c for c in cols if c.status == "mapped"]
     addresses = [c for c in cols if c.status == "address"]
     contacts = [c for c in cols if c.status == "contact"]
@@ -531,6 +688,15 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
 
     out_rows: list[dict] = []
     seen_employees: set = set()
+    keyed_dependents = keyed_dependents or {}
+    # Assignment IDs that occur on more than one assignment row cannot take
+    # keyed dependents unambiguously (Q1/Q18).
+    id_counts: Counter = Counter()
+    if ident_col is not None and keyed_dependents:
+        for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1):
+            if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols):
+                id_counts[_key_text(src_ws.cell(r, ident_col.idx).value)] += 1
+    consumed: set = set()
 
     for r in range(cfg.SOURCE_DATA_START_ROW, src_ws.max_row + 1):
         raw = {c.idx: src_ws.cell(r, c.idx).value for c in cols}
@@ -544,6 +710,9 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
 
         employee = main.get(cfg.COL_EMPLOYEE_NUMBER)
         identifier = convert("ASSIGNMENT_CF!CF_TEXT029", raw[ident_col.idx], layout, report, f"source {ident_col.letter}{r}") if ident_col else None
+        # Keyed dependents join only on this row's own Assignment ID, never on
+        # the Employee Number fallback below.
+        join_key = _key_text(identifier)
         if identifier is None:
             identifier = employee
             report.identifier_fallbacks += 1
@@ -599,6 +768,8 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             if any(v is not None for v in rec.values()):
                 validate_family(rec, cfg.FAMILY_PREFIXES[1], report, row_ref)
                 dep_recs.append(rec)
+        dep_recs.extend(_attach_keyed_dependents(join_key, employee, keyed_dependents, id_counts, consumed,
+                                                 bool(dep_recs), report, row_ref))
 
         # Equus layout: first row INSERTs the assignment; extra child records
         # go on UPDATE rows keyed by the Assignment Identifier.
@@ -620,7 +791,52 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         seen_employees.add(employee)
         report.assignments += 1
     report.current_row = None
+
+    unmatched = [e for key, entries in keyed_dependents.items() if key not in consumed for e in entries]
+    if unmatched:
+        sheet = report.rules.dependent_source.sheet
+        report.hold_dependents("HELD_DEPENDENTS_UNMATCHED", sheet, [f"row {e['row']}" for e in unmatched],
+                               sum(len(e["records"]) for e in unmatched))
     return out_rows
+
+
+def _attach_keyed_dependents(join_key: str | None, employee: Any, keyed: dict[str, list[dict]], id_counts: Counter,
+                             consumed: set, has_sheet_dependents: bool, report: Report, row_ref: str) -> list[dict]:
+    """Dependent records of the keyed source for one assignment row, joined
+    by its own Assignment ID only (Q18); conflicting rows are held."""
+    if join_key is None or join_key not in keyed:
+        return []
+    entries = keyed[join_key]
+    sheet = report.rules.dependent_source.sheet
+    first_visit = join_key not in consumed
+    consumed.add(join_key)
+    if id_counts[join_key] > 1:
+        if first_visit:
+            report.hold_dependents("HELD_DEPENDENTS_AMBIGUOUS", sheet, [f"row {e['row']}" for e in entries],
+                                   sum(len(e["records"]) for e in entries),
+                                   f"Assignment ID on {id_counts[join_key]} assignment rows")
+        return []
+    out, mismatched = [], []
+    employee_key = _key_text(employee)
+    for entry in entries:
+        if entry["employee"] is not None and entry["employee"] != employee_key:
+            mismatched.append(entry)
+            continue
+        if entry["employee"] is None:
+            report.warn(f"{sheet}!row {entry['row']}", cfg.FAMILY_PREFIXES[1],
+                        "dependent row has no Employee ID; attached by Assignment ID only")
+        for rec in entry["records"]:
+            validate_family(rec, cfg.FAMILY_PREFIXES[1], report, f"{sheet} row {entry['row']}")
+            out.append(rec)
+    if mismatched:
+        report.hold_dependents("HELD_DEPENDENTS_EMPLOYEE_MISMATCH", sheet, [f"row {e['row']}" for e in mismatched],
+                               sum(len(e["records"]) for e in mismatched), f"assignment at {row_ref}")
+    if out and has_sheet_dependents:
+        report.dependent_overlaps += 1
+        report.warn(row_ref, cfg.FAMILY_PREFIXES[1], "dependents from both the assignment sheet and the keyed "
+                                                     "dependent source; review for duplicates")
+    report.dependents_attached += len(out)
+    return out
 
 
 # --------------------------------------------------------------------------- io
@@ -792,6 +1008,23 @@ def compute_readiness(report: Report) -> Readiness:
         add("identifier", cfg.COL_EMPLOYEE_NUMBER, q, owner,
             f"{report.missing_employee_numbers} row(s) without an Employee Number")
 
+    for e in report.dependent_exceptions:
+        add("held_dependents", e["code"], e["q"], e["owner"],
+            f"sheet {e['sheet']!r}: {e['rows']} dependent row(s), {e['groups']} dependent record(s) held; {e['detail']}")
+    if report.dependent_overlaps:
+        q, owner, _ = cfg.DEPENDENT_HOLDS["HELD_DEPENDENTS_NOT_CONFIGURED"]
+        add("dependent_overlap", cfg.FAMILY_PREFIXES[1], q, owner,
+            f"{report.dependent_overlaps} assignment(s) have dependents from both the assignment sheet and the "
+            "keyed dependent source; review for duplicates")
+    q, owner = cfg.FAMILY_LIST_OWNER
+    for header in sorted({h for h, _ in report.family_values}):
+        values = [v for (h, v) in report.family_values if h == header]
+        not_in = [v for v in values if report.family_value_status(header, v) != "in list"]
+        if not_in:
+            state = "no Equus list" if header not in report.allowed_values else "Equus list"
+            add("family_value_not_in_list", header, q, owner,
+                f"{len(not_in)} of {len(values)} distinct value(s) not in list ({state}); sent unchanged")
+
     q, owner = cfg.READINESS_ITEMS["template_configuration"]
     for path, msg in report.config_issues:
         add("configuration", path, q, owner, msg)
@@ -854,6 +1087,7 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
         ws.append([label, value])
 
     _rules_sheet(wb.create_sheet("Rules"), report)
+    _family_sheet(wb.create_sheet("Family"), report)
     _readiness_sheet(wb.create_sheet("Readiness"), report)
 
     ws = wb.create_sheet("Warnings")
@@ -899,6 +1133,37 @@ def _rules_sheet(ws, report: Report) -> None:
     ws.append(["Provisional Conversion", "Equus Header", "Source Value", "Converted", "Occurrences"])
     for (header, text, iso), n in sorted(report.provisional.items(), key=str):
         ws.append(["provisional conversion", header, text, iso, n])
+
+
+FAMILY_EXCEPTION_HEADER = ["Code", "Sheet", "Dependent Rows", "Dependent Records", "Q", "Owner", "Detail",
+                           "Source Rows"]
+
+
+def _family_sheet(ws, report: Report) -> None:
+    """Spouse/dependent evidence: dependent source, held dependents,
+    DATA_QUALITY notes (Q10/Q20) and relationship values (Q14)."""
+    dep = report.rules.dependent_source
+    for label, value in [
+        ("Dependent source sheet", (dep.sheet or "not configured") if dep else "section absent"),
+        ("Dependent source status", f"{dep.status}, approved_for_import {'yes' if dep.approved_for_import else 'no'}, "
+                                    f"{dep.q}, owner {dep.owner}, version {dep.version}" if dep else ""),
+        ("Join key", f"Assignment ID ({dep.assignment_label!r}); Employee ID ({dep.employee_label!r}) "
+                     "cross-check only" if dep else ""),
+        ("Dependents attached from keyed source", report.dependents_attached),
+    ]:
+        ws.append([label, value])
+    ws.append([])
+    ws.append(FAMILY_EXCEPTION_HEADER)
+    for e in report.dependent_exceptions:
+        ws.append([e["code"], e["sheet"], e["rows"], e["groups"], e["q"], e["owner"], e["detail"], e["source_rows"]])
+    ws.append([])
+    ws.append(["DATA_QUALITY", "Where", "Record", "Populated Fields", "Missing"])
+    for n in report.data_quality:
+        ws.append([cfg.FAMILY_NAME_NOTE, n["where"], n["record"], n["fields"], n["missing"]])
+    ws.append([])
+    ws.append(["Family Value", "Equus Header", "Value Sent", "Occurrences", "List Check"])
+    for (header, value), n in sorted(report.family_values.items(), key=str):
+        ws.append(["relationship", header, value, n, report.family_value_status(header, value)])
 
 
 def _readiness_sheet(ws, report: Report) -> None:
@@ -955,7 +1220,8 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     if strict_pending and pending:
         raise PendingFieldsError("Pending (yellow) columns hold data: " +
                                  ", ".join(f"{c.letter} {c.topia or c.ui}" for c in pending))
-    rows = build_records(src_ws, report.columns, layout, report)
+    keyed_dependents = read_dependent_sources(src_wb, layout, report)
+    rows = build_records(src_ws, report.columns, layout, report, keyed_dependents)
     report.summarise_values()
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
     reconcile(src_ws, report.columns, out, report)

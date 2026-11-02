@@ -94,8 +94,8 @@ All of these are mapped today and flagged PENDING. Set `STRICT_PENDING=true` to 
 ## Data shape
 
 ### 10. Spouse and dependents
-- **Spouse:** SRC GW5/GW6 hold a relationship ("Spouse", "Partner") but no spouse name. Equus may reject the record or create an unnamed person, and every run warns about it. Is "Partner" a valid Equus value?
-- **Dependents:** the "Dependent Import" sheet has no employee key, so dependents can't be linked to an assignment and aren't migrated. Jake said more than 2 children need extra import rows, with written guidance promised. Which source holds the dependents, keyed by employee?
+- **Spouse:** SRC GW5/GW6 hold a relationship but no spouse name. **Answered (Q10, Jake):** spouse/partner records can be imported without names. **Code today:** written as sent with a DATA_QUALITY note ("importable per Q10/Q20, business review recommended"), never held. Still open: is "Partner" a valid Equus value? (Q14 list from Jake; reported "not in list" until then.)
+- **Dependents:** **Answered (Q11/Q18/Q19/Q20, Jake):** same import; every dependent row carries the Assignment Identifier; any number of dependents on UPDATE rows (example sheet ` Mny dependents Ex`); one populated field creates a record. **Code today:** the "Dependent Import" sheet has no Employee/Assignment key, so it is reported HELD_DEPENDENTS_UNKEYED with its row counts and nothing is attached. A keyed sheet can be configured in `business_rules.json` `$.dependent_source` (joined by Assignment ID only). Still open: a keyed dependent extract from Topia (Alka, D3). See docs/uat/UAT-04_family_rules.md.
 
 ### 11. Addresses and contacts
 - **Addresses:** SRC FJ/FL/FN/FP are free text. The code puts lines into LINE_1–3 and warns, but Equus wants CITY, COUNTRY_CODE and POSTAL_CODE separately (EQ CU–CX). What format does the export use?
