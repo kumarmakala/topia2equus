@@ -14,6 +14,11 @@ Environment:
   STRICT_PENDING   optional  "true" = fail while yellow (pending) columns hold data
   TEMPLATE_S3_URI  optional  s3://bucket/key of the Equus template; defaults
                              to the template bundled with the function
+
+Import readiness (transform.Readiness) is independent of STRICT_PENDING. The
+import workbook is named <stem>_EQUUS_<stamp>.xlsx only when readiness is
+READY_FOR_UAT_EXECUTION; otherwise <stem>_EQUUS_DRAFT_<stamp>.xlsx. The status
+is written to the S3 object metadata ("readiness") and the log summary.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ import posixpath
 from pathlib import Path
 from urllib.parse import unquote_plus
 
-from transform import transform
+from transform import READY, transform
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -56,11 +61,16 @@ def _read_with_etag(bucket: str, key: str) -> tuple[bytes, str]:
 
 
 def _code_version(template: bytes) -> str:
-    """Short hash of the mapping code and template, so a mapping change gives
-    new output keys while a duplicate event for the same source does not."""
+    """Short hash of the mapping code, business configuration and template, so
+    a mapping or rule-approval change gives new output keys while a duplicate
+    event for the same source does not."""
+    base = Path(__file__).parent
     h = hashlib.sha256(template)
-    for name in ("transform.py", "mapping_config.py"):
-        h.update((Path(__file__).parent / name).read_bytes())
+    for name in ("transform.py", "mapping_config.py", "business_rules.json"):
+        h.update((base / name).read_bytes())
+    for path in sorted((base / "reference_data").glob("*.json")):
+        h.update(path.name.encode())
+        h.update(path.read_bytes())
     return h.hexdigest()[:8]
 
 
@@ -146,17 +156,27 @@ def lambda_handler(event, context):
         # source ETag + code version, so a duplicate maps to the same objects.
         stem = posixpath.splitext(posixpath.basename(key))[0]
         stamp = f"{etag[:12]}_{_code_version(template)}"
-        out_key = f"{dest_prefix}{stem}_EQUUS_{stamp}.xlsx"
+        ready_key = f"{dest_prefix}{stem}_EQUUS_{stamp}.xlsx"
+        draft_key = f"{dest_prefix}{stem}_EQUUS_DRAFT_{stamp}.xlsx"
         report_key = f"{dest_prefix}reports/{stem}_MAPPING_REPORT_{stamp}.xlsx"
         meta = {"source-bucket": bucket, "source-key": key[:1024], "source-etag": etag}
-        if _exists(dest_bucket, out_key):
-            log.info("Skipping s3://%s/%s: already processed as %s", bucket, key, out_key)
+        done = next((k for k in (ready_key, draft_key) if _exists(dest_bucket, k)), None)
+        if done:
+            log.info("Skipping s3://%s/%s: already processed as %s", bucket, key, done)
             results.append({"source": f"s3://{bucket}/{key}", "skipped": "already processed"})
             continue
 
         log.info("Migrating s3://%s/%s", bucket, key)
         strict = os.environ.get("STRICT_PENDING", "false").lower() == "true"
         output, report_bytes, report = transform(body, template, strict_pending=strict)
+        readiness = report.readiness
+        # Never name a file as import-ready while it is not.
+        out_key = ready_key if readiness.status == READY else draft_key
+        meta.update({
+            "readiness": readiness.status,
+            "readiness-reasons": str(len(readiness.reasons)),
+            "business-rules-version": report.business_rules_version,
+        })
         if not report.reconciliation_ok:
             # Keep the evidence, withhold the import file, and fail the
             # invocation so the event lands on the on-failure queue.
@@ -178,6 +198,9 @@ def lambda_handler(event, context):
             "rows_written": report.rows_written,
             "unmapped_source_columns": sum(c.status == "unmapped" for c in report.columns),
             "warnings": len(report.warnings),
+            "readiness": readiness.status,
+            "readiness_reasons": len(readiness.reasons),
+            "business_rules_version": report.business_rules_version,
         }
         log.info(json.dumps(summary))
         results.append(summary)

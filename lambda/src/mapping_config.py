@@ -9,7 +9,21 @@ Source workbook ("FULL HISTORICAL PAST ASSIGNMENT ALL FIELDS"):
 Target workbook ("DATA MIGRATION SE EAFH TEST FILE"):
   row 1 = format instructions, row 2 = field names, row 3 = import headers,
   data from row 4.
+
+Business rules that change values (derivations, value maps, defaulted dates,
+column re-pointing, country conversion) are declared with their approval
+status in the versioned business_rules.json next to this file and loaded by
+load_business_rules(); reference lists live in reference_data/*.json and are
+loaded by load_reference_data(). Both loaders reject invalid configuration
+with ConfigurationError instead of ignoring it.
 """
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from fnmatch import fnmatchcase
+from pathlib import Path
 
 SOURCE_SHEET = "Full Historical Past Assignment"
 SOURCE_KEY_ROW = 2
@@ -21,14 +35,20 @@ SOURCE_FIRST_COL = 2  # column A holds row labels / employee full name
 # Business colour coding of source header rows 1-4 (exact ARGB fills).
 # red = not required, yellow = pending clarification with the customer,
 # cyan = Equus custom field, peach = standard field. Precedence follows the
-# order below; any other fill is reported as unknown.
+# order of COLOUR_PRECEDENCE; any other fill is reported as unknown.
 SOURCE_COLOUR_ROWS = (1, 2, 3, 4)
+# Q8 (Jake, jake-1.xlsx 'datamapping clarrification shef' column J): the
+# brown fill has no business meaning, so it is a known colour that decides
+# nothing (it is no longer reported as UNKNOWN_COLOUR).
+NO_MEANING_COLOUR = "none (Q8: no meaning)"
 FILL_COLOURS = {
     "FFFF0000": "red",
     "FFFFFF00": "yellow",
     "FF00FFFF": "cyan",
     "FFFCE5CD": "peach",
+    "FFB45F06": NO_MEANING_COLOUR,
 }
+COLOUR_PRECEDENCE = ("red", "yellow", "cyan", NO_MEANING_COLOUR, "peach")
 
 TARGET_SHEET = "Sheet1"
 TARGET_RULE_ROW = 1
@@ -76,7 +96,8 @@ FIELD_OVERRIDES = {
     "expense cost center name": "ASSIGNMENT_CF!CF_TEXT033",
     "host position": "ASSIGNMENT_CF!CF_TEXT025",
     "host employment type": "ASSIGNMENT_CF!CF_TEXT026",
-    "host job level": "ASSIGNMENT!TO_SALARY_GRADE",  # row 2 wrongly says TO_TITLE
+    # "host job level" -> TO_SALARY_GRADE is business rule
+    # host_job_level_to_salary_grade (Q32) in business_rules.json.
     "home scheduled weekly hours": "ASSIGNMENT_CF!CF_NUMBER004",
     "end of assignment reason": "ASSIGNMENT_CF!CF_TEXT030",
     "global id": "EMPLOYEE_CF!CF_TEXT014",
@@ -115,10 +136,6 @@ CONTACT_COLUMNS = {
     "mobile phone number": ("Personal Mobile", "Telephone"),
 }
 
-# Source column driving the "Cancelled" phase rule (see note on source col DH).
-CANCELLATION_REASON_LABEL = "cancellation reason"
-CANCELLED_PHASE = "Cancelled"
-
 # Equus headers that take ISO 3166-1 alpha-3 codes. Listed explicitly because
 # the template's row-1 rules are shifted one column against the row-3 keys in
 # columns Q-T (EMPLOYEE!BIRTH_COUNTRY has no rule; CF_TEXT016 has one).
@@ -132,17 +149,8 @@ COUNTRY_HEADERS = {
 }
 
 # Equus headers a business rule may fill when the mapped source cell is blank
-# (see transform.build_records). Reconciliation treats these as explained.
-RULE_TARGETS = {
-    "ASSIGNMENT!PHASE",
-    "ASSIGNMENT!INTERNATIONAL_RELO",
-    "ASSIGNMENT_COMPENSATION_SALARY!EFFECTIVE_DATE",
-    "ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE",
-}
-
-# Default effective/begin dates to the assignment start date when the source
-# has a value but no date of its own.
-DEFAULT_DATES_FROM_START = True
+# are derived from the approved rules (BusinessRules.applied_targets()), so
+# reconciliation only treats them as explained when the rule was applied.
 
 # Source placeholders treated as empty.
 BLANK_TOKENS = {"not provided", "n/a", "na", "null", "-"}
@@ -151,12 +159,8 @@ BLANK_TOKENS = {"not provided", "n/a", "na", "null", "-"}
 # are never blanked by a short token like "na".
 BLANK_PREFIX_TOKENS = ("not provided",)
 
-# Dropdown value translations, keyed by Equus header; lookups are
-# case-insensitive. Unlisted values pass through and are listed in the report.
-VALUE_MAPS = {
-    "EMPLOYEE!TYPE": {"employee": "Employee", "user": "User"},
-    "EMPLOYEE!EMPLOYMENT_STATUS": {"employed": "Active"},
-}
+# Dropdown value translations are business rule
+# value_maps_employee_type_and_status (Q35) in business_rules.json.
 
 # Plausibility ranges (inclusive) for numeric fields. Out-of-range values are
 # kept but warned. The 80-hour ceiling is a review threshold, not a business
@@ -180,14 +184,20 @@ COST_CENTER_CODE_RE = r"^[\w-]+_[A-Z]VC$"  # every code in the sample ends _NVC 
 FAMILY_PREFIXES = ("SPOUSE_DOMESTIC_PARTNER", "ASSIGNMENT_DEPENDENT")
 
 # Optional Equus dropdown lists, {"EQUUS!HEADER": ["Value", ...]}, bundled
-# next to this file when Equus supplies them. Missing file = no list check.
+# next to this file when Equus supplies them (Q14). A missing file or a
+# header without a list means every value sent to that dropdown is reported
+# as unvalidated and counts against import readiness.
 ALLOWED_VALUES_FILE = "equus_lists.json"
 
 # Resource dropdowns (coordinator, HRBP, managers...) need Equus resource
-# usernames. Fill as {"Topia display name or email": "equus.username"}.
-RESOURCE_MAP = {}
+# usernames: reference_data/resource_usernames.json (Q2). RESOURCE_MAP below
+# is derived from it and stays empty until that list is approved for import.
 
 # Country name -> ISO 3166-1 alpha-3, for Equus "Match Country Code" columns.
+# PROVISIONAL (Q12/Q3): hand-written, not the Equus country list. Used only
+# through business rule country_name_to_iso3; while that rule is not
+# approved_for_import every converted value is reported as a provisional
+# conversion and counts against import readiness.
 _COUNTRIES = """
 Afghanistan|AFG Aland Islands|ALA Albania|ALB Algeria|DZA American Samoa|ASM Andorra|AND Angola|AGO
 Anguilla|AIA Antarctica|ATA Antigua and Barbuda|ATG Argentina|ARG Armenia|ARM Aruba|ABW Australia|AUS
@@ -233,7 +243,6 @@ US Virgin Islands|VIR Yemen|YEM Zambia|ZMB Zimbabwe|ZWE
 def _parse_countries(text):
     table = {}
     # Entries are "Name|ISO"; names contain spaces, so split on the ISO code.
-    import re
     for name, iso in re.findall(r"\s*(.+?)\|([A-Z]{3})", text):
         table[name.strip().lower()] = iso
     return table
@@ -241,3 +250,472 @@ def _parse_countries(text):
 
 COUNTRY_ISO3 = _parse_countries(_COUNTRIES)
 ISO3_CODES = set(COUNTRY_ISO3.values())
+
+
+# =========================================================================== versioned business configuration
+#
+# business_rules.json declares every rule below with its Q number, approval
+# status and owner. A rule changes import output only while its entry says
+# approved_for_import: true; otherwise transform.py leaves the value alone
+# (or, for DIAGNOSTIC_RULES, performs the conversion but marks it provisional)
+# and reports the rule in the Rules and Readiness sheets.
+
+CONFIG_DIR = Path(__file__).resolve().parent
+BUSINESS_RULES_FILE = CONFIG_DIR / "business_rules.json"
+REFERENCE_DATA_DIR = CONFIG_DIR / "reference_data"
+
+# Approval vocabulary of clarifications/JAKE_Q1-Q43_EVIDENCE_ASSESSMENT.md.
+# A Jake answer is evidence, not approval: approved_for_import stays false
+# until the owner explicitly sets it.
+RULE_STATUSES = (
+    "confirmed_by_jake",
+    "partially_clarified",
+    "pending_business_approval",
+    "pending_equus_configuration",
+    "open",
+)
+
+RULE_INTERNATIONAL_RELO = "international_relo_derivation"
+RULE_CANCELLATION_PHASE = "cancellation_reason_sets_phase"
+RULE_DEFAULT_DATES = "default_effective_dates_from_start"
+RULE_VALUE_MAPS = "value_maps_employee_type_and_status"
+RULE_HOST_JOB_LEVEL = "host_job_level_to_salary_grade"
+RULE_COUNTRY_ISO3 = "country_name_to_iso3"
+
+# Rules that re-point one source column (by normalised Topia label) to an
+# Equus header. Not approved = the column is HELD, never mapped by its row 2.
+COLUMN_OVERRIDE_RULES = (RULE_HOST_JOB_LEVEL,)
+# Rules whose conversion is still performed while not approved, so the
+# report can show what it would produce; every result is "provisional".
+DIAGNOSTIC_RULES = (RULE_COUNTRY_ISO3,)
+
+# Owner / question of readiness items that are not a single rule. Taken from
+# the evidence assessment and OPEN_QUESTIONS.md; not approvals.
+READINESS_ITEMS = {
+    "pending_column": ("yellow (see OPEN_QUESTIONS.md section 6)", "Alka / John (mapping review)"),
+    "missing_target": ("Q6/Q7/Q29", "Jake (Equus template) / Schneider"),
+    "unknown_colour": ("Q8", "Alka (source colour legend)"),
+    "dropdown": ("Q14", "Jake (Equus lists)"),
+    "identifier": ("Q1", "Jake (Equus) / Alka, John (Topia column)"),
+    "reconciliation": ("Q27", "Schneider + Jake"),
+    "template_configuration": ("Q5/Q29", "Jake (Equus template)"),
+}
+
+
+class ConfigurationError(ValueError):
+    """Invalid or unsupported configuration. `source` is the file and `path`
+    the JSON path of the offending element (e.g. $.rules[2].status)."""
+
+    def __init__(self, source, path: str, message: str):
+        self.source = str(source)
+        self.path = path
+        self.message = message
+        super().__init__(f"{source}: {path}: {message}")
+
+
+class _Invalid(Exception):
+    def __init__(self, sub: str, msg: str):
+        super().__init__(msg)
+        self.sub, self.msg = sub, msg
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+_Q_RE = re.compile(r"^Q\d{1,2}(/Q\d{1,2})*$")
+_HEADER_RE = re.compile(r"^[A-Z0-9_]+![A-Z0-9_]+$")
+
+
+def _text(v, sub=""):
+    if not (isinstance(v, str) and v.strip()):
+        raise _Invalid(sub, "must be a non-empty string")
+
+
+def _label(v, sub=""):
+    _text(v, sub)
+    if v != " ".join(v.split()).lower():
+        raise _Invalid(sub, "must be a normalised (lower-case, single-spaced) Topia label")
+
+
+def _header(v, sub=""):
+    if not (isinstance(v, str) and _HEADER_RE.match(v)):
+        raise _Invalid(sub, f"must be an Equus header like TABLE!FIELD, got {v!r}")
+
+
+def _header_list(v, sub=""):
+    if not isinstance(v, list) or not v:
+        raise _Invalid(sub, "must be a non-empty list of Equus headers")
+    for i, h in enumerate(v):
+        _header(h, f"{sub}[{i}]")
+    if len(set(v)) != len(v):
+        raise _Invalid(sub, "contains duplicate headers")
+
+
+def _dates_map(v, sub=""):
+    if not isinstance(v, dict) or not v:
+        raise _Invalid(sub, "must be a non-empty object {date header: [trigger headers]}")
+    for date_header, triggers in v.items():
+        _header(date_header, f"{sub}.{date_header}")
+        _header_list(triggers, f"{sub}.{date_header}")
+
+
+def _value_maps(v, sub=""):
+    if not isinstance(v, dict) or not v:
+        raise _Invalid(sub, "must be a non-empty object {Equus header: {source value: Equus value}}")
+    for header, mapping in v.items():
+        _header(header, f"{sub}.{header}")
+        if not isinstance(mapping, dict) or not mapping:
+            raise _Invalid(f"{sub}.{header}", "must be a non-empty object")
+        for src, dst in mapping.items():
+            if not src or src != src.strip().lower():
+                raise _Invalid(f"{sub}.{header}.{src}",
+                               "source values are matched case-insensitively and must be lower-case")
+            _text(dst, f"{sub}.{header}.{src}")
+
+
+def _one_of(*allowed):
+    def check(v, sub=""):
+        if v not in allowed:
+            raise _Invalid(sub, f"must be one of {list(allowed)}")
+    return check
+
+
+def _iso_timestamp(v, sub=""):
+    _text(v, sub)
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        raise _Invalid(sub, "must be an ISO 8601 date or timestamp") from None
+
+
+def _q_number(v, sub=""):
+    if not (isinstance(v, str) and _Q_RE.match(v)):
+        raise _Invalid(sub, "must be a question number like 'Q12' or 'Q22/Q23'")
+
+
+def _status(v, sub=""):
+    if v not in RULE_STATUSES:
+        raise _Invalid(sub, f"unknown status {v!r}; allowed: {', '.join(RULE_STATUSES)}")
+
+
+def _boolean(v, sub=""):
+    if not isinstance(v, bool):
+        raise _Invalid(sub, "must be true or false")
+
+
+# Parameter schema of every rule the engine implements: exactly these keys.
+RULE_PARAMETERS = {
+    RULE_INTERNATIONAL_RELO: {
+        "target": _header, "home_country": _header, "host_country": _header,
+        "value_if_different": _text, "value_if_same": _text,
+    },
+    RULE_CANCELLATION_PHASE: {"source_label": _label, "target": _header, "value": _text},
+    RULE_DEFAULT_DATES: {"start_header": _header, "effective_dates": _dates_map, "child_dates": _header_list},
+    RULE_VALUE_MAPS: {"maps": _value_maps},
+    RULE_HOST_JOB_LEVEL: {"source_label": _label, "target": _header},
+    RULE_COUNTRY_ISO3: {"table": _one_of("mapping_config.COUNTRY_ISO3")},
+}
+
+_META_CHECKS = (("version", _text), ("effective_version", _text), ("generated_at", _iso_timestamp))
+_TOP_REQUIRED = ("version", "effective_version", "generated_at", "rules")
+_TOP_OPTIONAL = ("description",)
+_RULE_REQUIRED = ("id", "Q", "title", "status", "approved_for_import", "owner", "parameters")
+_RULE_OPTIONAL = ("notes", "approval_reference")
+
+
+def _run(check, value, source, path: str) -> None:
+    try:
+        check(value, "")
+    except _Invalid as exc:
+        raise ConfigurationError(source, path + exc.sub, exc.msg) from None
+
+
+def _check_object(obj, path: str, source, required, optional) -> None:
+    if not isinstance(obj, dict):
+        raise ConfigurationError(source, path, "must be a JSON object")
+    for key in obj:
+        if key not in required and key not in optional:
+            raise ConfigurationError(source, f"{path}.{key}", "unknown key")
+    for key in required:
+        if key not in obj:
+            raise ConfigurationError(source, f"{path}.{key}", "missing required key")
+
+
+def _strict_pairs(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise _DuplicateKey(key)
+        obj[key] = value
+    return obj
+
+
+def _reject_constant(name):
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
+def _read_json(path: Path):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigurationError(path, "$", f"cannot read file ({exc.__class__.__name__})") from None
+    try:
+        return json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_reject_constant)
+    except _DuplicateKey as exc:
+        raise ConfigurationError(path, "$", f"duplicate key {exc.args[0]!r}") from None
+    except ValueError as exc:
+        raise ConfigurationError(path, "$", f"invalid JSON: {exc}") from None
+
+
+def _walk_headers(value, path: str):
+    if isinstance(value, str):
+        if _HEADER_RE.match(value):
+            yield path, value
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            yield from _walk_headers(item, f"{path}[{i}]")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if _HEADER_RE.match(key):
+                yield f"{path}.{key}", key
+            yield from _walk_headers(item, f"{path}.{key}")
+
+
+@dataclass(frozen=True)
+class BusinessRule:
+    id: str
+    q: str
+    title: str
+    status: str
+    approved_for_import: bool
+    owner: str
+    parameters: dict
+    path: str
+    notes: str = ""
+    approval_reference: str = ""
+
+
+@dataclass(frozen=True)
+class BusinessRules:
+    source: str
+    version: str
+    effective_version: str
+    generated_at: str
+    rules: dict  # rule id -> BusinessRule, in file order
+
+    @property
+    def file_name(self) -> str:
+        return Path(self.source).name
+
+    def rule(self, rule_id: str) -> BusinessRule:
+        try:
+            return self.rules[rule_id]
+        except KeyError:
+            raise ConfigurationError(self.source, "$.rules", f"rule {rule_id!r} is not declared") from None
+
+    def rule_enabled(self, rule_id: str) -> bool:
+        return self.rule(rule_id).approved_for_import
+
+    def params(self, rule_id: str) -> dict:
+        return self.rule(rule_id).parameters
+
+    def header_refs(self):
+        """(JSON path, Equus header) for every header a rule refers to."""
+        for rule in self.rules.values():
+            yield from _walk_headers(rule.parameters, f"{rule.path}.parameters")
+
+    def applied_targets(self) -> set:
+        """Headers an *approved* rule fills when the mapped source cell is blank."""
+        targets = set()
+        for rule_id in (RULE_INTERNATIONAL_RELO, RULE_CANCELLATION_PHASE):
+            if self.rule_enabled(rule_id):
+                targets.add(self.params(rule_id)["target"])
+        if self.rule_enabled(RULE_DEFAULT_DATES):
+            targets.update(self.params(RULE_DEFAULT_DATES)["effective_dates"])
+        return targets
+
+
+def load_business_rules(path=None) -> BusinessRules:
+    """Load and strictly validate business_rules.json (or `path`)."""
+    source = Path(path) if path is not None else BUSINESS_RULES_FILE
+    data = _read_json(source)
+    _check_object(data, "$", source, _TOP_REQUIRED, _TOP_OPTIONAL)
+    for key, check in _META_CHECKS:
+        _run(check, data[key], source, f"$.{key}")
+    if "description" in data:
+        _run(_text, data["description"], source, "$.description")
+    raw_rules = data["rules"]
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise ConfigurationError(source, "$.rules", "must be a non-empty list")
+
+    rules: dict = {}
+    for i, raw in enumerate(raw_rules):
+        p = f"$.rules[{i}]"
+        _check_object(raw, p, source, _RULE_REQUIRED, _RULE_OPTIONAL)
+        _run(_text, raw["id"], source, f"{p}.id")
+        rule_id = raw["id"]
+        if rule_id in rules:
+            raise ConfigurationError(source, f"{p}.id",
+                                     f"duplicate rule id {rule_id!r} (first declared at {rules[rule_id].path})")
+        if rule_id not in RULE_PARAMETERS:
+            raise ConfigurationError(source, f"{p}.id",
+                                     f"unsupported rule id {rule_id!r}; supported: {', '.join(RULE_PARAMETERS)}")
+        _run(_q_number, raw["Q"], source, f"{p}.Q")
+        _run(_text, raw["title"], source, f"{p}.title")
+        _run(_status, raw["status"], source, f"{p}.status")
+        _run(_boolean, raw["approved_for_import"], source, f"{p}.approved_for_import")
+        _run(_text, raw["owner"], source, f"{p}.owner")
+        for key in _RULE_OPTIONAL:
+            if key in raw:
+                _run(_text, raw[key], source, f"{p}.{key}")
+        schema = RULE_PARAMETERS[rule_id]
+        _check_object(raw["parameters"], f"{p}.parameters", source, tuple(schema), ())
+        for name, check in schema.items():
+            _run(check, raw["parameters"][name], source, f"{p}.parameters.{name}")
+        rules[rule_id] = BusinessRule(
+            id=rule_id, q=raw["Q"], title=raw["title"], status=raw["status"],
+            approved_for_import=raw["approved_for_import"], owner=raw["owner"],
+            parameters=raw["parameters"], path=p, notes=raw.get("notes", ""),
+            approval_reference=raw.get("approval_reference", ""),
+        )
+    missing = [rule_id for rule_id in RULE_PARAMETERS if rule_id not in rules]
+    if missing:
+        raise ConfigurationError(source, "$.rules", f"missing rule(s) {', '.join(missing)}: every rule the "
+                                                    "engine implements must be declared with its approval status")
+    return BusinessRules(source=str(source), version=data["version"], effective_version=data["effective_version"],
+                         generated_at=data["generated_at"], rules=rules)
+
+
+# --------------------------------------------------------------------------- reference data
+#
+# One JSON per list in reference_data/. Absent file, empty values or
+# approved_for_import false = every value of the covered headers is an
+# exception ("unknown value"), never a guess. applies_to uses fnmatch
+# patterns over Equus headers.
+#   kind "lookup":          source value -> Equus value (values: {str: str})
+#   kind "allowed_values":  converted value must be a key of `values`
+
+COST_CENTRE_CODE_HEADERS = tuple(code for code, _ in CODE_NAME_PAIRS)
+
+REFERENCE_LISTS = {
+    "resource_usernames": {"kind": "lookup", "value_type": str, "Q": "Q2", "owner": "Jake (Equus)",
+                           "applies_to": ("*RESOURCE*",)},
+    "cost_centres": {"kind": "allowed_values", "value_type": str, "Q": "Q15", "owner": "Jake (Equus) / Alka (Topia)",
+                     "applies_to": COST_CENTRE_CODE_HEADERS},
+    "country_state": {"kind": "allowed_values", "value_type": list, "Q": "Q12/Q3", "owner": "Jake (Equus)",
+                      "applies_to": tuple(sorted(COUNTRY_HEADERS))},
+}
+RESOURCE_LIST_ID = "resource_usernames"
+
+_REF_REQUIRED = ("list_id", "version", "effective_version", "generated_at", "Q", "title", "status",
+                 "approved_for_import", "owner", "values")
+_REF_OPTIONAL = ("description", "notes", "approval_reference")
+
+
+@dataclass(frozen=True)
+class ReferenceList:
+    list_id: str
+    kind: str
+    q: str
+    title: str
+    status: str
+    approved_for_import: bool
+    owner: str
+    version: str
+    effective_version: str
+    applies_to: tuple
+    values: dict
+    source: str
+    present: bool = True
+
+    @property
+    def usable(self) -> bool:
+        return self.present and self.approved_for_import and bool(self.values)
+
+    @property
+    def state(self) -> str:
+        if not self.present:
+            return "file absent"
+        if not self.values:
+            return "empty"
+        if not self.approved_for_import:
+            return "not approved_for_import"
+        return "approved"
+
+    def applies(self, header: str) -> bool:
+        return any(fnmatchcase(header, pattern) for pattern in self.applies_to)
+
+
+def _check_values(values, value_type, source, path: str) -> None:
+    if not isinstance(values, dict):
+        raise ConfigurationError(source, path, "must be a JSON object")
+    for key, value in values.items():
+        if not key.strip():
+            raise ConfigurationError(source, f"{path}.{key}", "keys must be non-empty")
+        if value_type is str:
+            _run(_text, value, source, f"{path}.{key}")
+        elif not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+            raise ConfigurationError(source, f"{path}.{key}", "must be a list of non-empty strings")
+
+
+def load_reference_data(directory=None) -> dict:
+    """Load and strictly validate reference_data/*.json (or `directory`)."""
+    directory = Path(directory) if directory is not None else REFERENCE_DATA_DIR
+    if directory.exists() and not directory.is_dir():
+        raise ConfigurationError(directory, "$", "reference data location is not a directory")
+    files = {p.stem: p for p in sorted(directory.glob("*.json"))} if directory.is_dir() else {}
+    for stem, path in files.items():
+        if stem not in REFERENCE_LISTS:
+            raise ConfigurationError(path, "$", f"unsupported reference list {stem!r}; "
+                                                f"supported: {', '.join(REFERENCE_LISTS)}")
+    out = {}
+    for list_id, decl in REFERENCE_LISTS.items():
+        path = files.get(list_id)
+        if path is None:
+            out[list_id] = ReferenceList(
+                list_id=list_id, kind=decl["kind"], q=decl["Q"], title=f"{list_id} (file absent)", status="open",
+                approved_for_import=False, owner=decl["owner"], version="", effective_version="",
+                applies_to=decl["applies_to"], values={}, source=str(directory / f"{list_id}.json"), present=False)
+            continue
+        data = _read_json(path)
+        _check_object(data, "$", path, _REF_REQUIRED, _REF_OPTIONAL)
+        if data["list_id"] != list_id:
+            raise ConfigurationError(path, "$.list_id", f"must equal the file name {list_id!r}")
+        for key, check in _META_CHECKS:
+            _run(check, data[key], path, f"$.{key}")
+        _run(_q_number, data["Q"], path, "$.Q")
+        _run(_text, data["title"], path, "$.title")
+        _run(_status, data["status"], path, "$.status")
+        _run(_boolean, data["approved_for_import"], path, "$.approved_for_import")
+        _run(_text, data["owner"], path, "$.owner")
+        for key in _REF_OPTIONAL:
+            if key in data:
+                _run(_text, data[key], path, f"$.{key}")
+        _check_values(data["values"], decl["value_type"], path, "$.values")
+        out[list_id] = ReferenceList(
+            list_id=list_id, kind=decl["kind"], q=data["Q"], title=data["title"], status=data["status"],
+            approved_for_import=data["approved_for_import"], owner=data["owner"], version=data["version"],
+            effective_version=data["effective_version"], applies_to=decl["applies_to"], values=data["values"],
+            source=str(path))
+    return out
+
+
+# --------------------------------------------------------------------------- shipped configuration
+# Loaded at import so a broken shipped file fails the Lambda cold start
+# instead of producing output. transform() reloads (or takes a test copy).
+
+BUSINESS_RULES = load_business_rules()
+REFERENCE_DATA = load_reference_data()
+
+
+def rule_enabled(rule_id: str, rules: BusinessRules | None = None) -> bool:
+    """True only when the rule's configuration entry is approved_for_import."""
+    return (rules if rules is not None else BUSINESS_RULES).rule_enabled(rule_id)
+
+
+# Read-only views for local/build_field_mapping.py (documentation output).
+VALUE_MAPS = BUSINESS_RULES.params(RULE_VALUE_MAPS)["maps"]
+CANCELLATION_REASON_LABEL = BUSINESS_RULES.params(RULE_CANCELLATION_PHASE)["source_label"]
+CANCELLED_PHASE = BUSINESS_RULES.params(RULE_CANCELLATION_PHASE)["value"]
+RESOURCE_MAP = dict(REFERENCE_DATA[RESOURCE_LIST_ID].values) if REFERENCE_DATA[RESOURCE_LIST_ID].usable else {}

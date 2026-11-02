@@ -1,5 +1,10 @@
 """Transform a Topia Full Historical Past Assignment export into the Equus
-EAFH import layout. Pure functions: bytes in, bytes out, no AWS calls."""
+EAFH import layout. Pure functions: bytes in, bytes out, no AWS calls.
+
+Business rules are read from the versioned configuration
+(mapping_config.load_business_rules / load_reference_data). A rule changes
+output only while its entry is approved_for_import; otherwise the affected
+rows are counted and reported in the Rules and Readiness sheets."""
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +23,7 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 import mapping_config as cfg
+from mapping_config import ConfigurationError  # noqa: F401  (re-exported for callers)
 
 KEY_RE = re.compile(r"^[A-Z0-9_]+![A-Z0-9_]+$")
 DATE_FORMAT = "MM/DD/YYYY"
@@ -24,6 +31,11 @@ _DATE_PATTERNS = ("%m/%d/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%Y-%m-%d %H:%
 
 ADDR = "ASSIGNMENT_MAILING_ADDRESS!"
 CONTACT = "ASSIGNMENT_EMPLOYEE_CONTACT!"
+
+# Import-readiness statuses. Without Equus access nothing better than
+# READY_FOR_UAT_EXECUTION can be computed here (never "signed off").
+READY = "READY_FOR_UAT_EXECUTION"
+NOT_READY = "NOT_READY"
 
 
 def norm_label(value: Any) -> str:
@@ -59,12 +71,13 @@ class SourceColumn:
     key: Any
     ui: Any
     topia: Any
-    status: str = "unmapped"  # mapped | address | contact | dependent | rule | ignored | excluded | unmapped | duplicate
+    status: str = "unmapped"  # mapped | address | contact | dependent | rule | held | ignored | excluded | unmapped | duplicate
     target: str | None = None
     note: str = ""
-    colour: str = "none"  # red | yellow | cyan | peach | none | unknown:<ARGB>
-    flags: list[str] = field(default_factory=list)  # PENDING | MISSING_TARGET | UNKNOWN_COLOUR
+    colour: str = "none"  # red | yellow | cyan | peach | none | none (Q8: no meaning) | unknown:<ARGB>
+    flags: list[str] = field(default_factory=list)  # PENDING | MISSING_TARGET | UNKNOWN_COLOUR | HELD
     has_data: bool = False
+    rule: str | None = None  # business rule id that claims or holds this column
 
     @property
     def letter(self) -> str:
@@ -94,6 +107,12 @@ class TargetLayout:
 
 
 @dataclass
+class Readiness:
+    status: str
+    reasons: list[dict] = field(default_factory=list)  # category, item, q, owner, detail
+
+
+@dataclass
 class Report:
     columns: list[SourceColumn] = field(default_factory=list)
     warnings: list[tuple[Any, str, str]] = field(default_factory=list)
@@ -107,9 +126,44 @@ class Report:
     source_sha256: str = ""
     reconciliation: list[dict] = field(default_factory=list)
     reconciliation_ok: bool = False
+    # Configuration in force and what the rules did.
+    rules: Any = None  # mapping_config.BusinessRules
+    reference_data: dict = field(default_factory=dict)  # list id -> mapping_config.ReferenceList
+    rule_rows: dict = field(default_factory=lambda: defaultdict(set))  # rule id -> source rows affected
+    provisional: Counter = field(default_factory=Counter)  # (header, source text, converted) -> n
+    reference_values: Counter = field(default_factory=Counter)  # (list id, header, value) -> n
+    config_issues: list[tuple[str, str]] = field(default_factory=list)  # (config path, message)
+    identifier_fallbacks: int = 0
+    missing_employee_numbers: int = 0
+    current_row: Any = None
+    readiness: Readiness | None = None
+
+    @property
+    def business_rules_version(self) -> str:
+        return self.rules.version if self.rules is not None else ""
 
     def warn(self, row: Any, fld: str, msg: str) -> None:
         self.warnings.append((row, fld, msg))
+
+    def rule_hit(self, rule_id: str, row: Any = None) -> None:
+        """Record that `rule_id` applies (or would apply) to a source row."""
+        self.rule_rows[rule_id].add(self.current_row if row is None else row)
+
+    def rule_enabled(self, rule_id: str) -> bool:
+        return self.rules.rule_enabled(rule_id)
+
+    def lookup_values(self, header: str) -> dict:
+        """Approved lookup values for `header` (empty unless a list is usable)."""
+        out: dict = {}
+        for lst in self.reference_data.values():
+            if lst.kind == "lookup" and lst.usable and lst.applies(header):
+                out.update(lst.values)
+        return out
+
+    def note_reference_value(self, header: str, value: Any) -> None:
+        for lst in self.reference_data.values():
+            if lst.kind == "allowed_values" and lst.applies(header):
+                self.reference_values[(lst.list_id, header, str(value))] += 1
 
     def allowed(self, header: str, value: Any) -> str:
         if header not in self.allowed_values:
@@ -119,10 +173,15 @@ class Report:
     def summarise_values(self) -> None:
         """One warning per distinct unmapped resource / disallowed dropdown value."""
         for (header, value), n in sorted(self.unmapped_resources.items(), key=str):
-            self.warn("all rows", header, f"{value!r} ({n}x) not in RESOURCE_MAP; Equus expects a username")
+            self.warn("all rows", header, f"{value!r} ({n}x) not in RESOURCE_MAP "
+                                          f"(reference_data/{cfg.RESOURCE_LIST_ID}.json); Equus expects a username")
         for (header, value), n in sorted(self.dropdown_values.items(), key=str):
             if self.allowed(header, value) == "NO":
                 self.warn("all rows", header, f"{value!r} ({n}x) not in Equus list")
+        for (list_id, header, value), n in sorted(self.reference_values.items(), key=str):
+            lst = self.reference_data.get(list_id)
+            if lst is not None and lst.usable and value not in lst.values:
+                self.warn("all rows", header, f"{value!r} ({n}x) not in approved reference list {list_id} ({lst.q})")
 
 
 # --------------------------------------------------------------------------- layout
@@ -149,13 +208,17 @@ def column_colour(ws, c: int) -> str:
         if fill is None or fill.fill_type is None or fill.fgColor.type != "rgb":
             continue
         found.append(fill.fgColor.rgb)
-    for argb, name in cfg.FILL_COLOURS.items():
-        if argb in found and name != "peach":
+    names = {cfg.FILL_COLOURS[f] for f in found if f in cfg.FILL_COLOURS}
+    for name in cfg.COLOUR_PRECEDENCE[:3]:  # colours with a business meaning
+        if name in names:
             return name
     unknown = [f for f in found if f not in cfg.FILL_COLOURS]
     if unknown:
         return f"unknown:{unknown[0]}"
-    return "peach" if found else "none"
+    for name in cfg.COLOUR_PRECEDENCE[3:]:
+        if name in names:
+            return name
+    return "none"
 
 
 def check_template(layout: TargetLayout, report: Report) -> None:
@@ -169,7 +232,24 @@ def check_template(layout: TargetLayout, report: Report) -> None:
                                             "rules may be shifted against row 3")
 
 
-def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
+def check_configuration(layout: TargetLayout, report: Report) -> None:
+    """Every Equus header the configuration refers to must exist in the template."""
+    rules = report.rules
+    for path, header in rules.header_refs():
+        if header not in layout.headers:
+            msg = f"{rules.file_name} {path}: {header} not in Equus template"
+            report.config_issues.append((path, msg))
+            report.warn("configuration", header, msg)
+    for lst in report.reference_data.values():
+        for pattern in lst.applies_to:
+            if not any(fnmatchcase(h, pattern) for h in layout.headers):
+                msg = f"reference list {lst.list_id}: applies_to {pattern!r} matches no Equus template header"
+                report.config_issues.append((lst.list_id, msg))
+                report.warn("configuration", pattern, msg)
+
+
+def build_column_plan(ws, layout: TargetLayout, rules: cfg.BusinessRules | None = None) -> list[SourceColumn]:
+    rules = rules if rules is not None else cfg.BUSINESS_RULES
     cols = []
     for c in range(cfg.SOURCE_FIRST_COL, ws.max_column + 1):
         col = SourceColumn(
@@ -202,9 +282,19 @@ def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
             col.status, col.target, col.note = "mapped", target, note
             claimed[target] = col
 
-    # Pass 1: special roles and explicit overrides (these win over row 2).
+    def hold(col: SourceColumn, rule: cfg.BusinessRule) -> None:
+        col.status, col.rule = "held", rule.id
+        col.note = (f"held: rule {rule.id} ({rule.q}, {rule.status}, owner {rule.owner}) "
+                    "not approved_for_import; not migrated")
+        col.flags.append("HELD")
+
+    cancel = rules.rule(cfg.RULE_CANCELLATION_PHASE)
+    overrides = {rules.params(rule_id)["source_label"]: rules.rule(rule_id) for rule_id in cfg.COLUMN_OVERRIDE_RULES}
+
+    # Pass 1: special roles, rule columns and explicit overrides (these win over row 2).
     for col in cols:
         label = col.label
+        ui_label = norm_label(col.ui)
         if col.status == "excluded":
             continue
         if label in cfg.ADDRESS_COLUMNS:
@@ -213,10 +303,22 @@ def build_column_plan(ws, layout: TargetLayout) -> list[SourceColumn]:
             col.status, col.note = "contact", "LOCATION_TYPE/CONTACT_TYPE = %s / %s" % cfg.CONTACT_COLUMNS[label]
         elif label.startswith(cfg.IGNORED_LABEL_PREFIXES):
             col.status, col.note = "ignored", "describes a constant location type"
-        elif label == cfg.CANCELLATION_REASON_LABEL:
-            col.status, col.note = "rule", f"non-empty -> ASSIGNMENT!PHASE = {cfg.CANCELLED_PHASE}"
-        elif label in cfg.FIELD_OVERRIDES or norm_label(col.ui) in cfg.FIELD_OVERRIDES:
-            target = cfg.FIELD_OVERRIDES.get(label, cfg.FIELD_OVERRIDES.get(norm_label(col.ui)))
+        elif label == cancel.parameters["source_label"]:
+            if cancel.approved_for_import:
+                col.status, col.rule = "rule", cancel.id
+                col.note = (f"non-empty -> {cancel.parameters['target']} = {cancel.parameters['value']} "
+                            f"(rule {cancel.id}, {cancel.q})")
+            else:
+                hold(col, cancel)
+        elif label in overrides or ui_label in overrides:
+            rule = overrides[label] if label in overrides else overrides[ui_label]
+            if rule.approved_for_import:
+                claim(col, rule.parameters["target"], f"override by rule {rule.id} ({rule.q})")
+                col.rule = rule.id
+            else:
+                hold(col, rule)
+        elif label in cfg.FIELD_OVERRIDES or ui_label in cfg.FIELD_OVERRIDES:
+            target = cfg.FIELD_OVERRIDES.get(label, cfg.FIELD_OVERRIDES.get(ui_label))
             if target is None:
                 col.status, col.note = "ignored", "excluded in mapping_config.FIELD_OVERRIDES"
             else:
@@ -275,6 +377,13 @@ def is_dirty_placeholder(value: Any) -> bool:
 
 
 def convert(header: str, value: Any, layout: TargetLayout, report: Report, row: Any) -> Any:
+    value = _convert(header, value, layout, report, row)
+    if value is not None:
+        report.note_reference_value(header, value)
+    return value
+
+
+def _convert(header: str, value: Any, layout: TargetLayout, report: Report, row: Any) -> Any:
     if is_blank(value):
         return None
     if isinstance(value, str):
@@ -297,6 +406,11 @@ def convert(header: str, value: Any, layout: TargetLayout, report: Report, row: 
         if iso is None:
             report.warn(row, header, f"no ISO-3 code for country {text!r}; passed through")
             return text
+        # Performed even while the rule is not approved (diagnostics), but
+        # then every converted value is a provisional conversion.
+        report.rule_hit(cfg.RULE_COUNTRY_ISO3)
+        if not report.rule_enabled(cfg.RULE_COUNTRY_ISO3):
+            report.provisional[(header, text, iso)] += 1
         return iso
 
     if isinstance(value, bool):
@@ -311,11 +425,17 @@ def convert(header: str, value: Any, layout: TargetLayout, report: Report, row: 
         if not low <= value <= high:
             report.warn(row, header, f"value {value} outside expected range {low}-{high}; kept, please verify")
 
-    if header in cfg.VALUE_MAPS and isinstance(value, str):
-        value = cfg.VALUE_MAPS[header].get(value.lower(), value)
+    value_maps = report.rules.params(cfg.RULE_VALUE_MAPS)["maps"]
+    if header in value_maps and isinstance(value, str):
+        mapped = value_maps[header].get(value.lower(), value)
+        if mapped != value:
+            report.rule_hit(cfg.RULE_VALUE_MAPS)
+            if report.rule_enabled(cfg.RULE_VALUE_MAPS):
+                value = mapped
     if layout.is_resource(header) and isinstance(value, str):
-        if value in cfg.RESOURCE_MAP:
-            value = cfg.RESOURCE_MAP[value]
+        lookup = report.lookup_values(header)
+        if value in lookup:
+            value = lookup[value]
         else:
             report.unmapped_resources[(header, value)] += 1
     if layout.is_dropdown(header) or layout.is_resource(header):
@@ -339,6 +459,52 @@ def validate_family(rec: dict, prefix: str, report: Report, row_ref: str) -> Non
                                      "but no first/last name; Equus may reject or create an unnamed person")
 
 
+# --------------------------------------------------------------------------- rules
+
+def apply_assignment_rules(main: dict, cancel_value: Any, report: Report) -> None:
+    """Assignment-level business rules. Each one changes `main` only while its
+    configuration entry is approved_for_import; otherwise the row is only
+    counted as affected for the Rules and Readiness sheets."""
+    rule_id = cfg.RULE_CANCELLATION_PHASE
+    if not is_blank(cancel_value):
+        report.rule_hit(rule_id)
+        if report.rule_enabled(rule_id):
+            p = report.rules.params(rule_id)
+            main[p["target"]] = p["value"]
+
+    rule_id = cfg.RULE_INTERNATIONAL_RELO
+    p = report.rules.params(rule_id)
+    home, host = main.get(p["home_country"]), main.get(p["host_country"])
+    if main.get(p["target"]) is None and home and host:
+        report.rule_hit(rule_id)
+        if report.rule_enabled(rule_id):
+            main[p["target"]] = p["value_if_different"] if home != host else p["value_if_same"]
+
+    rule_id = cfg.RULE_DEFAULT_DATES
+    p = report.rules.params(rule_id)
+    start = main.get(p["start_header"])
+    if start:
+        for date_header, triggers in p["effective_dates"].items():
+            if main.get(date_header) is None and any(main.get(t) is not None for t in triggers):
+                report.rule_hit(rule_id)
+                if report.rule_enabled(rule_id):
+                    main[date_header] = start
+
+
+def default_child_dates(rec: dict, start: Any, report: Report) -> None:
+    """Begin/start date of a child record (address, contact) from the
+    assignment start date, only while the date rule is approved."""
+    rule_id = cfg.RULE_DEFAULT_DATES
+    if not start or not rec:
+        return
+    tables = {k.split("!")[0] for k in rec}
+    for header in report.rules.params(rule_id)["child_dates"]:
+        if header.split("!")[0] in tables and rec.get(header) is None:
+            report.rule_hit(rule_id)
+            if report.rule_enabled(rule_id):
+                rec[header] = start
+
+
 # --------------------------------------------------------------------------- rows
 
 def _group_dependents(cols: list[SourceColumn]) -> list[list[SourceColumn]]:
@@ -358,8 +524,10 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
     addresses = [c for c in cols if c.status == "address"]
     contacts = [c for c in cols if c.status == "contact"]
     dependents = _group_dependents(cols)
-    cancel_col = next((c for c in cols if c.status == "rule"), None)
+    cancel_col = next((c for c in cols if c.rule == cfg.RULE_CANCELLATION_PHASE), None)
+    override_cols = [c for c in cols if c.rule in cfg.COLUMN_OVERRIDE_RULES]
     ident_col = next((c for c in cols if c.label == cfg.ASSIGNMENT_IDENTIFIER_LABEL), None)
+    start_header = report.rules.params(cfg.RULE_DEFAULT_DATES)["start_header"]
 
     out_rows: list[dict] = []
     seen_employees: set = set()
@@ -368,6 +536,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         raw = {c.idx: src_ws.cell(r, c.idx).value for c in cols}
         if all(is_blank(v) for v in raw.values()):
             continue
+        report.current_row = r
         row_ref = f"source row {r}"
         main = {}
         for col in mapped:
@@ -377,23 +546,18 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
         identifier = convert("ASSIGNMENT_CF!CF_TEXT029", raw[ident_col.idx], layout, report, f"source {ident_col.letter}{r}") if ident_col else None
         if identifier is None:
             identifier = employee
+            report.identifier_fallbacks += 1
             report.warn(row_ref, cfg.COL_ASSIGNMENT_IDENTIFIER, "no Topia Assignment ID; using Employee Number")
         if employee is None:
+            report.missing_employee_numbers += 1
             report.warn(row_ref, cfg.COL_EMPLOYEE_NUMBER, "missing Employee Number (Talent Link ID)")
 
-        # Business rules
-        if cancel_col and not is_blank(raw[cancel_col.idx]):
-            main["ASSIGNMENT!PHASE"] = cfg.CANCELLED_PHASE
-        home, host = main.get("ASSIGNMENT!FROM_COUNTRY"), main.get("ASSIGNMENT!TO_COUNTRY")
-        if main.get("ASSIGNMENT!INTERNATIONAL_RELO") is None and home and host:
-            main["ASSIGNMENT!INTERNATIONAL_RELO"] = "Yes" if home != host else "No"
-        start = main.get("ASSIGNMENT!START_DATE")
-        if cfg.DEFAULT_DATES_FROM_START and start:
-            if main.get("ASSIGNMENT_COMPENSATION_SALARY!ANNUAL_BASE_PAY_AMOUNT") is not None:
-                main["ASSIGNMENT_COMPENSATION_SALARY!EFFECTIVE_DATE"] = main.get("ASSIGNMENT_COMPENSATION_SALARY!EFFECTIVE_DATE") or start
-            if any(main.get(k) is not None for k in ("ASSIGNMENT_FAMILY_SIZE!HOST_FAMILY_SIZE", "ASSIGNMENT_FAMILY_SIZE!HOME_FAMILY_SIZE")):
-                main["ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE"] = main.get("ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE") or start
-        begin = start if cfg.DEFAULT_DATES_FROM_START else None
+        # Business rules (configuration-gated)
+        apply_assignment_rules(main, raw[cancel_col.idx] if cancel_col else None, report)
+        for col in override_cols:
+            if not is_blank(raw[col.idx]):
+                report.rule_hit(col.rule)
+        start = main.get(start_header)
         validate_record(main, report, row_ref)
 
         # Child records
@@ -406,11 +570,11 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             rec = {
                 ADDR + "PRIMARY_ADDRESS": "Yes",
                 ADDR + "LOCATION_TYPE": cfg.ADDRESS_COLUMNS[col.label],
-                ADDR + "BEGIN_DATE": begin,
                 ADDR + "LINE_1": lines[0] if lines else None,
                 ADDR + "LINE_2": lines[1] if len(lines) > 1 else None,
                 ADDR + "LINE_3": ", ".join(lines[2:]) or None,
             }
+            default_child_dates(rec, start, report)
             report.warn(row_ref, ADDR + "LINE_1", f"address from column {col.letter} loaded as free text; verify city/postal/country split")
             addr_recs.append(rec)
 
@@ -420,13 +584,14 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             if is_blank(value):
                 continue
             loc, ctype = cfg.CONTACT_COLUMNS[col.label]
-            contact_recs.append({
+            rec = {
                 CONTACT + "LOCATION_TYPE": loc,
                 CONTACT + "CONTACT_TYPE": ctype,
                 CONTACT + "NUMBER_ADDRESS": str(int(value)) if isinstance(value, float) and value.is_integer() else str(value).strip(),
-                CONTACT + "START_DATE": begin,
                 CONTACT + "PRIMARY_CONTACT": "Yes",
-            })
+            }
+            default_child_dates(rec, start, report)
+            contact_recs.append(rec)
 
         dep_recs = []
         for group in dependents:
@@ -454,6 +619,7 @@ def build_records(src_ws, cols: list[SourceColumn], layout: TargetLayout, report
             out_rows.append(row)
         seen_employees.add(employee)
         report.assignments += 1
+    report.current_row = None
     return out_rows
 
 
@@ -497,6 +663,7 @@ def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -
                    if not all(is_blank(src_ws.cell(r, c.idx).value) for c in cols)]
     report.data_rows = len(source_rows)
     counts_ok = len(source_rows) == len(insert_rows) == report.assignments
+    rule_targets = report.rules.applied_targets()
 
     report.reconciliation = []
     for col in (c for c in cols if c.status == "mapped"):
@@ -518,7 +685,7 @@ def reconcile(src_ws, cols: list[SourceColumn], output: bytes, report: Report) -
                 else:
                     row["unexplained"] += 1
             elif not present and out is not None:
-                row["set_by_rule" if col.target in cfg.RULE_TARGETS else "unexplained"] += 1
+                row["set_by_rule" if col.target in rule_targets else "unexplained"] += 1
             elif present and isinstance(out, (date, datetime)):
                 is_date_col = True
                 src_date, out_date = to_date(raw), out
@@ -537,6 +704,106 @@ def _ordinal(value: Any) -> int:
         value = value.date()
     return value.toordinal() if isinstance(value, date) else 0
 
+
+# --------------------------------------------------------------------------- readiness
+
+def compute_readiness(report: Report) -> Readiness:
+    """READY_FOR_UAT_EXECUTION only when nothing is gated, pending, held,
+    provisional, unvalidated or unreconciled; NOT_READY otherwise. Reasons
+    carry counts and headers, never source values (they are logged)."""
+    reasons: list[dict] = []
+
+    def add(category: str, item: str, q: str, owner: str, detail: str) -> None:
+        reasons.append({"category": category, "item": item, "q": q, "owner": owner, "detail": detail})
+
+    rules = report.rules
+    for rule in rules.rules.values():
+        n = len(report.rule_rows.get(rule.id, ()))
+        if n and not rule.approved_for_import:
+            effect = ("conversion performed for diagnostics only; results are provisional"
+                      if rule.id in cfg.DIAGNOSTIC_RULES else "rule not applied")
+            add("gated_rule", rule.id, rule.q, rule.owner,
+                f"status {rule.status}, not approved_for_import; {n} source row(s) affected; {effect}")
+
+    if report.provisional:
+        rule = rules.rule(cfg.RULE_COUNTRY_ISO3)
+        for (header, _text, iso), n in sorted(report.provisional.items(), key=str):
+            add("provisional_conversion", header, rule.q, rule.owner,
+                f"provisional conversion to {iso} ({n}x); see Rules sheet")
+
+    for c in report.columns:
+        where = f"source {c.letter} ({c.topia or c.ui})"
+        if "HELD" in c.flags and c.has_data:
+            rule = rules.rule(c.rule)
+            add("held_column", where, rule.q, rule.owner, c.note)
+        if "PENDING" in c.flags and c.has_data:
+            q, owner = cfg.READINESS_ITEMS["pending_column"]
+            add("pending_column", where, q, owner, f"yellow (pending clarification) column holds data; status {c.status}")
+        if "MISSING_TARGET" in c.flags and c.has_data:
+            q, owner = cfg.READINESS_ITEMS["missing_target"]
+            add("missing_target", where, q, owner, "cyan custom field holds data but has no Equus column; not migrated")
+        if "UNKNOWN_COLOUR" in c.flags:
+            q, owner = cfg.READINESS_ITEMS["unknown_colour"]
+            add("unknown_colour", where, q, owner, f"fill {c.colour} has no agreed meaning")
+
+    seen: dict = defaultdict(set)
+    unknown: dict = defaultdict(set)
+    for (list_id, header, value) in report.reference_values:
+        lst = report.reference_data[list_id]
+        seen[list_id].add((header, value))
+        if lst.usable and value not in lst.values:
+            unknown[list_id].add((header, value))
+    for list_id in sorted(seen):
+        lst = report.reference_data[list_id]
+        headers = ", ".join(sorted({h for h, _ in seen[list_id]}))
+        if not lst.usable:
+            add("reference_list_unavailable", list_id, lst.q, lst.owner,
+                f"list {lst.state}: {len(seen[list_id])} distinct value(s) in {headers} cannot be validated")
+        elif unknown[list_id]:
+            add("reference_value_unknown", list_id, lst.q, lst.owner,
+                f"{len(unknown[list_id])} distinct value(s) in {headers} not in the approved list")
+
+    if report.unmapped_resources:
+        lst = report.reference_data.get(cfg.RESOURCE_LIST_ID)
+        q, owner = (lst.q, lst.owner) if lst is not None else cfg.READINESS_ITEMS["dropdown"]
+        state = lst.state if lst is not None else "not configured"
+        add("reference_lookup_missing", cfg.RESOURCE_LIST_ID, q, owner,
+            f"list {state}: {len(report.unmapped_resources)} distinct resource value(s) have no approved Equus username")
+
+    lookup_lists = [lst for lst in report.reference_data.values() if lst.kind == "lookup"]
+    q, owner = cfg.READINESS_ITEMS["dropdown"]
+    for header in sorted({h for h, _ in report.dropdown_values}):
+        if any(lst.applies(header) for lst in lookup_lists):
+            continue  # resource fields: covered by their lookup list above
+        values = [v for (h, v) in report.dropdown_values if h == header]
+        if header not in report.allowed_values:
+            add("dropdown_list_missing", header, q, owner,
+                f"{len(values)} distinct value(s) sent with no Equus list to validate them")
+        else:
+            bad = [v for v in values if report.allowed(header, v) == "NO"]
+            if bad:
+                add("dropdown_value_not_allowed", header, q, owner, f"{len(bad)} distinct value(s) not in the Equus list")
+
+    q, owner = cfg.READINESS_ITEMS["identifier"]
+    if report.identifier_fallbacks:
+        add("identifier", cfg.COL_ASSIGNMENT_IDENTIFIER, q, owner,
+            f"{report.identifier_fallbacks} row(s) without a Topia Assignment ID used the Employee Number")
+    if report.missing_employee_numbers:
+        add("identifier", cfg.COL_EMPLOYEE_NUMBER, q, owner,
+            f"{report.missing_employee_numbers} row(s) without an Employee Number")
+
+    q, owner = cfg.READINESS_ITEMS["template_configuration"]
+    for path, msg in report.config_issues:
+        add("configuration", path, q, owner, msg)
+
+    if not report.reconciliation_ok:
+        q, owner = cfg.READINESS_ITEMS["reconciliation"]
+        add("reconciliation", "Reconciliation", q, owner, "source-to-output reconciliation did not balance")
+
+    return Readiness(status=NOT_READY if reasons else READY, reasons=reasons)
+
+
+# --------------------------------------------------------------------------- report
 
 def build_report(report: Report, layout: TargetLayout) -> bytes:
     wb = openpyxl.Workbook()
@@ -586,6 +853,9 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
                          ("Source SHA-256", report.source_sha256)]:
         ws.append([label, value])
 
+    _rules_sheet(wb.create_sheet("Rules"), report)
+    _readiness_sheet(wb.create_sheet("Readiness"), report)
+
     ws = wb.create_sheet("Warnings")
     ws.append(["Where", "Field", "Message"])
     for w in report.warnings:
@@ -596,18 +866,76 @@ def build_report(report: Report, layout: TargetLayout) -> bytes:
     return buf.getvalue()
 
 
+RULES_HEADER = ["Rule ID", "Q", "Title", "Status", "Owner", "Approved For Import", "Applied?", "Rows Affected", "Notes"]
+READINESS_HEADER = ["Category", "Item", "Q", "Owner", "Detail"]
+
+
+def rule_applied(report: Report, rule: cfg.BusinessRule) -> str:
+    n = len(report.rule_rows.get(rule.id, ()))
+    if rule.approved_for_import:
+        return "yes" if n else "yes (no rows affected)"
+    if rule.id in cfg.DIAGNOSTIC_RULES and n:
+        return "provisional (diagnostic only)"
+    return "no (gated)"
+
+
+def _rules_sheet(ws, report: Report) -> None:
+    rules = report.rules
+    for label, value in [("Business rules file", rules.file_name), ("Version", rules.version),
+                         ("Effective version", rules.effective_version), ("Generated at", rules.generated_at)]:
+        ws.append([label, value])
+    ws.append([])
+    ws.append(RULES_HEADER)
+    for rule in rules.rules.values():
+        ws.append([rule.id, rule.q, rule.title, rule.status, rule.owner, "yes" if rule.approved_for_import else "no",
+                   rule_applied(report, rule), len(report.rule_rows.get(rule.id, ())), rule.notes])
+    ws.append([])
+    ws.append(["Reference List", "Q", "Status", "Owner", "Approved For Import", "Version", "Values", "State",
+               "Applies To"])
+    for lst in report.reference_data.values():
+        ws.append([lst.list_id, lst.q, lst.status, lst.owner, "yes" if lst.approved_for_import else "no",
+                   lst.version, len(lst.values), lst.state, ", ".join(lst.applies_to)])
+    ws.append([])
+    ws.append(["Provisional Conversion", "Equus Header", "Source Value", "Converted", "Occurrences"])
+    for (header, text, iso), n in sorted(report.provisional.items(), key=str):
+        ws.append(["provisional conversion", header, text, iso, n])
+
+
+def _readiness_sheet(ws, report: Report) -> None:
+    readiness = report.readiness
+    for label, value in [("Status", readiness.status),
+                         ("Business rules version", report.business_rules_version),
+                         ("Reasons", len(readiness.reasons)),
+                         ("Equus UAT execution", "INCOMPLETE - not executed from this environment; the best "
+                                                 f"status this tool can compute is {READY}")]:
+        ws.append([label, value])
+    ws.append([])
+    ws.append(READINESS_HEADER)
+    for r in readiness.reasons:
+        ws.append([r["category"], r["item"], r["q"], r["owner"], r["detail"]])
+
+
 def load_allowed_values() -> dict[str, list[str]] | None:
     path = Path(__file__).parent / cfg.ALLOWED_VALUES_FILE
     return json.loads(path.read_text()) if path.exists() else None
 
 
 def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool = False,
-              allowed_values: dict[str, list[str]] | None = None) -> tuple[bytes, bytes, Report]:
+              allowed_values: dict[str, list[str]] | None = None,
+              business_rules: Any = None, reference_data: Any = None) -> tuple[bytes, bytes, Report]:
     """Return (equus_workbook_bytes, report_workbook_bytes, report).
 
     strict_pending: refuse to build the output while yellow (pending) columns
-    hold data.
-    allowed_values: Equus dropdown lists; defaults to ALLOWED_VALUES_FILE if bundled."""
+    hold data. Independent of report.readiness.
+    allowed_values: Equus dropdown lists; defaults to ALLOWED_VALUES_FILE if bundled.
+    business_rules: path to a business_rules.json (or a loaded BusinessRules);
+    defaults to the shipped file. reference_data: directory of reference lists
+    (or a loaded dict); defaults to the shipped reference_data/.
+    Invalid configuration raises mapping_config.ConfigurationError before any
+    workbook is read."""
+    rules = business_rules if isinstance(business_rules, cfg.BusinessRules) else cfg.load_business_rules(business_rules)
+    refs = reference_data if isinstance(reference_data, dict) else cfg.load_reference_data(reference_data)
+
     src_wb = openpyxl.load_workbook(io.BytesIO(source_bytes), data_only=True)
     if cfg.SOURCE_SHEET not in src_wb.sheetnames:
         raise ValueError(f"Source sheet {cfg.SOURCE_SHEET!r} not found; got {src_wb.sheetnames}")
@@ -616,12 +944,13 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     tpl_wb = openpyxl.load_workbook(io.BytesIO(template_bytes))
     layout = read_target_layout(tpl_wb[cfg.TARGET_SHEET])
 
-    report = Report(source_sha256=hashlib.sha256(source_bytes).hexdigest())
+    report = Report(source_sha256=hashlib.sha256(source_bytes).hexdigest(), rules=rules, reference_data=refs)
     if allowed_values is None:
         allowed_values = load_allowed_values() or {}
     report.allowed_values = {h: {str(v).lower() for v in vals} for h, vals in allowed_values.items()}
     check_template(layout, report)
-    report.columns = build_column_plan(src_ws, layout)
+    check_configuration(layout, report)
+    report.columns = build_column_plan(src_ws, layout, rules)
     pending = [c for c in report.columns if "PENDING" in c.flags and c.has_data]
     if strict_pending and pending:
         raise PendingFieldsError("Pending (yellow) columns hold data: " +
@@ -630,4 +959,5 @@ def transform(source_bytes: bytes, template_bytes: bytes, strict_pending: bool =
     report.summarise_values()
     out = write_output(template_bytes, rows, cfg.TARGET_SHEET, report)
     reconcile(src_ws, report.columns, out, report)
+    report.readiness = compute_readiness(report)
     return out, build_report(report, layout), report

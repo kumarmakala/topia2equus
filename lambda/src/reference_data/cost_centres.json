@@ -1,0 +1,13 @@
+{
+  "list_id": "cost_centres",
+  "description": "Cost-centre code -> cost-centre name. Placeholder: list pending (Q15; Q42 code vs name). Empty or not approved = every cost-centre code is unvalidated; names are never manufactured.",
+  "version": "0.0.0",
+  "effective_version": "0.0.0",
+  "generated_at": "2026-11-02",
+  "Q": "Q15",
+  "title": "Equus cost centres",
+  "status": "pending_equus_configuration",
+  "approved_for_import": false,
+  "owner": "Jake (Equus) / Alka (Topia)",
+  "values": {}
+}

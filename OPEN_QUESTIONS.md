@@ -10,6 +10,20 @@ Cell references are to:
 Every run's mapping report lists the same items in its Governance and
 Warnings sheets.
 
+**Business rules and readiness (UAT-02):** the value-changing rules below
+(Q34 cancellation phase, Q40 international relocation, Q22/Q23 defaulted
+dates, Q35 value maps, Q32 host job level, Q12/Q3 country table) are now
+declared in `lambda/src/business_rules.json` with their Q number, status
+and owner, and are **not applied** to the import file until
+`approved_for_import` is set to `true` by the owner. Reference lists
+(Q2 resource usernames, Q15 cost centres, Q12 country/state) live in
+`lambda/src/reference_data/` as empty placeholders. Each run's Rules and
+Readiness sheets list every gated rule, provisional conversion and pending
+or held item; the import file is named `*_EQUUS_DRAFT_*` while readiness is
+`NOT_READY`. Where a section below says "Code today" for one of these
+rules, read it as "behaviour once approved". See
+`docs/uat/UAT-02_business_rules_configuration.md`.
+
 ## Identity
 
 ### 1. Which value is the Assignment Identifier?
@@ -74,8 +88,8 @@ All of these are mapped today and flagged PENDING. Set `STRICT_PENDING=true` to 
 
 ### 9. Brown fill on spouse columns (SRC GS–GX, row 4, `FFB45F06`)
 - **Evidence:** the colour isn't covered by the agreed colour rules.
-- **Code today:** mapped by field key and flagged UNKNOWN_COLOUR.
-- **Question:** what does brown mean?
+- **Answered (Q8, Jake):** brown has no business meaning.
+- **Code today:** mapped by field key; colour reported as `none (Q8: no meaning)`, no longer UNKNOWN_COLOUR.
 
 ## Data shape
 

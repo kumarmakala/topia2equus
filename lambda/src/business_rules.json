@@ -1,0 +1,108 @@
+{
+  "description": "Business rules of the Topia -> Equus EAFH transformation. A rule changes import output only while approved_for_import is true; a Jake answer is evidence, not approval (every tracker Status in clarifications/jake-1.xlsx column I is Open). Validated strictly by mapping_config.load_business_rules().",
+  "version": "1.0.0",
+  "effective_version": "1.0.0",
+  "generated_at": "2026-11-02",
+  "rules": [
+    {
+      "id": "international_relo_derivation",
+      "Q": "Q40",
+      "title": "Derive ASSIGNMENT!INTERNATIONAL_RELO (Yes/No) from home country != host country",
+      "status": "open",
+      "approved_for_import": false,
+      "owner": "Schneider",
+      "notes": "Assessment D4 / Q40: no approved rule; unanswered.",
+      "parameters": {
+        "target": "ASSIGNMENT!INTERNATIONAL_RELO",
+        "home_country": "ASSIGNMENT!FROM_COUNTRY",
+        "host_country": "ASSIGNMENT!TO_COUNTRY",
+        "value_if_different": "Yes",
+        "value_if_same": "No"
+      }
+    },
+    {
+      "id": "cancellation_reason_sets_phase",
+      "Q": "Q34",
+      "title": "Non-empty Cancellation Reason sets ASSIGNMENT!PHASE = Cancelled",
+      "status": "open",
+      "approved_for_import": false,
+      "owner": "Jake + Schneider",
+      "notes": "Assessment D4 / Q34: status/phase/cancellation precedence unanswered; the source-sheet note is not an approval.",
+      "parameters": {
+        "source_label": "cancellation reason",
+        "target": "ASSIGNMENT!PHASE",
+        "value": "Cancelled"
+      }
+    },
+    {
+      "id": "default_effective_dates_from_start",
+      "Q": "Q22/Q23",
+      "title": "Default salary and family-size effective dates, address BEGIN_DATE and contact START_DATE to the assignment start date",
+      "status": "open",
+      "approved_for_import": false,
+      "owner": "Jake (Q22) / Alka, John (Q23)",
+      "notes": "Assessment D4 / Q22, Q23: no written date rule.",
+      "parameters": {
+        "start_header": "ASSIGNMENT!START_DATE",
+        "effective_dates": {
+          "ASSIGNMENT_COMPENSATION_SALARY!EFFECTIVE_DATE": [
+            "ASSIGNMENT_COMPENSATION_SALARY!ANNUAL_BASE_PAY_AMOUNT"
+          ],
+          "ASSIGNMENT_FAMILY_SIZE!EFFECTIVE_DATE": [
+            "ASSIGNMENT_FAMILY_SIZE!HOST_FAMILY_SIZE",
+            "ASSIGNMENT_FAMILY_SIZE!HOME_FAMILY_SIZE"
+          ]
+        },
+        "child_dates": [
+          "ASSIGNMENT_MAILING_ADDRESS!BEGIN_DATE",
+          "ASSIGNMENT_EMPLOYEE_CONTACT!START_DATE"
+        ]
+      }
+    },
+    {
+      "id": "value_maps_employee_type_and_status",
+      "Q": "Q35",
+      "title": "Translate Person Status / Employment Status values to Equus dropdown values",
+      "status": "open",
+      "approved_for_import": false,
+      "owner": "Jake",
+      "notes": "Assessment D4 / Q35: crosswalk unanswered; source columns are yellow (pending).",
+      "parameters": {
+        "maps": {
+          "EMPLOYEE!TYPE": {
+            "employee": "Employee",
+            "user": "User"
+          },
+          "EMPLOYEE!EMPLOYMENT_STATUS": {
+            "employed": "Active"
+          }
+        }
+      }
+    },
+    {
+      "id": "host_job_level_to_salary_grade",
+      "Q": "Q32",
+      "title": "Map Topia Host Job Level to ASSIGNMENT!TO_SALARY_GRADE (source row 2 says TO_TITLE)",
+      "status": "open",
+      "approved_for_import": false,
+      "owner": "Jake / Alka",
+      "notes": "Assessment D4 / Q32: correction of the row-2 field not approved. While not approved the column is HELD (not mapped by its row 2 either).",
+      "parameters": {
+        "source_label": "host job level",
+        "target": "ASSIGNMENT!TO_SALARY_GRADE"
+      }
+    },
+    {
+      "id": "country_name_to_iso3",
+      "Q": "Q12/Q3",
+      "title": "Convert country names to ISO 3166-1 alpha-3 with the provisional hand-written table",
+      "status": "partially_clarified",
+      "approved_for_import": false,
+      "owner": "Jake (Equus country/state list)",
+      "notes": "Q12: country must match Equus system values (list still to be provided). Conversion is performed for diagnostics; every converted value is reported as a provisional conversion.",
+      "parameters": {
+        "table": "mapping_config.COUNTRY_ISO3"
+      }
+    }
+  ]
+}
