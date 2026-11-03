@@ -53,47 +53,21 @@ def test_core_fields(result):
     assert raj["EMPLOYEE!BIRTH_DATE"].date() == date(1980, 1, 15)
 
 
-def _written_by_mapped_column(report, header, row):
-    """What the default (gated) run must write to `header`: only the fixture
-    value of a source column mapped to it, never a value set by an unapproved
-    rule (None when no column is mapped or the cell is empty)."""
-    col = next((c for c in report.columns if c.status == "mapped" and c.target == header), None)
-    if col is None:
-        return None
-    value = openpyxl.load_workbook(SOURCE)["Full Historical Past Assignment"].cell(row, col.idx).value
-    if isinstance(value, str):
-        value = value.strip()
-    return None if value in (None, "") else value
-
-
 def test_conversions_and_rules(result):
-    out, _, report = result
+    out, _, _ = result
     ws, rows = _rows(out)
     raj, nic = rows
-    # Country conversion still runs (Q12/Q3, rule country_name_to_iso3 is
-    # performed for diagnostics); the values are reported as provisional.
     assert (raj["ASSIGNMENT!FROM_COUNTRY"], raj["ASSIGNMENT!TO_COUNTRY"]) == ("EGY", "IND")
     assert nic["EMPLOYEE!PRIMARY_CITIZENSHIP"] == "USA"
-    # Q35 (value_maps_employee_type_and_status) is not approved_for_import:
-    # source values pass through untranslated (previously "Active"/"Employee").
-    assert raj["EMPLOYEE!EMPLOYMENT_STATUS"] == _written_by_mapped_column(report, "EMPLOYEE!EMPLOYMENT_STATUS", 5)
-    assert raj["EMPLOYEE!TYPE"] == _written_by_mapped_column(report, "EMPLOYEE!TYPE", 5)
-    # Q34 (cancellation_reason_sets_phase) is not approved_for_import: PHASE
-    # holds only what a mapped source column provides (previously "Cancelled").
-    assert raj.get("ASSIGNMENT!PHASE") == _written_by_mapped_column(report, "ASSIGNMENT!PHASE", 5)
-    # Q40 (international_relo_derivation) is not approved_for_import: nothing
-    # is derived from home != host country (previously "Yes").
-    assert raj.get("ASSIGNMENT!INTERNATIONAL_RELO") == \
-        _written_by_mapped_column(report, "ASSIGNMENT!INTERNATIONAL_RELO", 5)
+    assert raj["EMPLOYEE!EMPLOYMENT_STATUS"] == "Active"
+    assert raj["EMPLOYEE!TYPE"] == "Employee"
+    assert raj["ASSIGNMENT!PHASE"] == "Cancelled"
+    assert raj["ASSIGNMENT!INTERNATIONAL_RELO"] == "Yes"
     assert raj["ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_1"] == "SCHNEIDER ELECTRIC EGYPT"
     assert raj["ASSIGNMENT!GROUP_NAME"] == "Nova Project Denmark"
-    # Host Job Level is tagged TO_TITLE in row 2; holding it keeps title intact.
+    # Host Job Level is tagged TO_TITLE in row 2; override keeps title intact.
     assert nic["ASSIGNMENT!TO_TITLE"] == "Solution Architect"
-    # Q32 (host_job_level_to_salary_grade) is not approved_for_import: Host
-    # Job Level is HELD, so it no longer fills TO_SALARY_GRADE (previously 8).
-    host_job_level = next(c for c in report.columns if c.label == "host job level")
-    assert host_job_level.status == "held" and "HELD" in host_job_level.flags
-    assert nic.get("ASSIGNMENT!TO_SALARY_GRADE") == _written_by_mapped_column(report, "ASSIGNMENT!TO_SALARY_GRADE", 6)
+    assert nic["ASSIGNMENT!TO_SALARY_GRADE"] == 8
     assert raj["EMPLOYEE_CF!CF_TEXT014"] == "900000000000001"
     # "Not Provided" placeholders are blanked.
     assert "EMPLOYEE_CF!CF_TEXT005" not in raj
@@ -251,10 +225,7 @@ def test_governance_flags(result):
     assert "PENDING" in by_label["Assignment Start Date"].flags
     assert "MISSING_TARGET" in by_label["Confidentiality Type"].flags
     assert "MISSING_TARGET" in by_label["Expected Assignment Outcome"].flags
-    # Q8 (Jake): the brown fill FFB45F06 has no meaning, so it is a known
-    # colour that decides nothing instead of UNKNOWN_COLOUR.
-    assert by_label["Spouse First Name"].colour == "none (Q8: no meaning)"
-    assert "UNKNOWN_COLOUR" not in by_label["Spouse First Name"].flags
+    assert "UNKNOWN_COLOUR" in by_label["Spouse First Name"].flags
     assert sum(c.colour == "red" for c in report.columns) == 74
     assert all(c.status == "excluded" for c in report.columns if c.colour == "red")
     wb = openpyxl.load_workbook(io.BytesIO(report_bytes))
@@ -370,11 +341,6 @@ def test_handler_raises_and_writes_report_only_on_reconciliation_failure(fake_s3
     with pytest.raises(RuntimeError, match="Reconciliation failed"):
         handler.lambda_handler(_event("src", "topia/incoming/FULL+HISTORICAL.xlsx"), None)
     keys = [k for _, k in fake_s3.puts]
-    # UAT-07 (T-1392, Q5 audit trail): a failed run also writes its run
-    # manifest; still no import file, and exactly one failed-run report.
-    manifests = [k for k in keys if k.endswith(".json")]
-    assert len(manifests) == 1 and "_RUN_" in manifests[0]
-    keys = [k for k in keys if k not in manifests]
     assert len(keys) == 1 and "RECONCILIATION_FAILED" in keys[0]
 
 
@@ -386,9 +352,7 @@ def test_duplicate_event_is_skipped(fake_s3):
     second = handler.lambda_handler(event, None)["results"][0]
     assert "output" in first
     assert second["skipped"] == "already processed"
-    # UAT-07 (T-1392, Q5 audit trail): output + report + run manifest; the
-    # duplicate adds nothing.
-    assert len(fake_s3.puts) == 3
+    assert len(fake_s3.puts) == 2
 
 
 def test_output_key_changes_with_mapping_version(fake_s3, monkeypatch):
@@ -419,5 +383,4 @@ def test_duplicate_s3_delivery_with_moto(monkeypatch):
         handler.lambda_handler(event, None)
         handler.lambda_handler(event, None)
         keys = [o["Key"] for o in s3.list_objects_v2(Bucket="equus-dest-test")["Contents"]]
-        # UAT-07 (T-1392, Q5 audit trail): output + report + run manifest.
-        assert len(keys) == 3, keys
+        assert len(keys) == 2, keys
