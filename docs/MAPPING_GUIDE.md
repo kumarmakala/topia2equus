@@ -104,6 +104,54 @@ matching Equus column.**
 4. If a Topia column isn't in the dictionary, it is **left out and noted in a
    report** — nothing disappears silently.
 
+### Flow diagram — one field's journey
+
+How a single value (e.g. `Gur`) travels from a Topia column to an Equus column:
+
+```mermaid
+flowchart TD
+    A["Topia column<br/>'First Name' = Gur"] --> B["Clean the label<br/>First Name → first name"]
+    B --> C{"Is it in the dictionary?<br/>FIELD_MAP"}
+    C -->|No| X["Leave it out<br/>(note it in the report)"]
+    C -->|Yes| D["Target Equus field<br/>EMPLOYEE!FIRST_NAME"]
+    D --> E{"Does the column<br/>have a rule?"}
+    E -->|No rule| F["Keep value as-is<br/>Gur"]
+    E -->|"US date / country /<br/>dropdown"| G["Reformat the value<br/>e.g. 1971-05-28 → 05/28/1971"]
+    G --> H
+    F --> H["Write into the Equus column<br/>EMPLOYEE!FIRST_NAME"]
+```
+
+### Flow diagram — the whole file, start to finish
+
+```mermaid
+flowchart TD
+    REF["Reference crosswalk<br/>SOURCE_FULL...ALL FIELDS.xlsx"] -. "builds (once)" .-> DICT["FIELD_MAP<br/>in mapping_config.py"]
+
+    S["Topia Source.xlsx<br/>(the input)"] --> P1["1. Read & clean every column name"]
+    P1 --> P2["2. Classify each column<br/>mapped / address / contact /<br/>dependent / identity / unmapped"]
+    DICT -. "used to classify" .-> P2
+    P2 --> P3["3. Build rows per employee<br/>1 main INSERT row<br/>+ child UPDATE rows"]
+    P3 --> P4["4. Convert values<br/>dates, country codes, dropdowns"]
+    P4 --> P5["5. Write into Equus template<br/>by row-3 DB field"]
+    P5 --> P6["6. Relabel headers<br/>to match the reference crosswalk"]
+    P6 --> O1["EQUUS .xlsx<br/>(the import file)"]
+    P6 --> O2["MAPPING_REPORT .xlsx<br/>(audit: what mapped, what didn't)"]
+```
+
+### Flow diagram — why one person can become several rows
+
+Extra addresses, contacts and dependents each become their own `UPDATE` row,
+linked back to the main row by the **Assignment Identifier**:
+
+```mermaid
+flowchart TD
+    E["One employee in Topia<br/>(e.g. 2 addresses, 1 dependent)"] --> M["Row 0 — INSERT<br/>all main fields<br/>+ 1st address"]
+    E --> U1["Row 1 — UPDATE<br/>2nd address only"]
+    E --> U2["Row 2 — UPDATE<br/>dependent only"]
+    M -. "same Assignment Identifier = 60936" .- U1
+    U1 -. "same Assignment Identifier = 60936" .- U2
+```
+
 ---
 
 ## 1. The three spreadsheets involved
