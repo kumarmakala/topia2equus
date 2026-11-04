@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Topia Source -> Equus EAFH import migration (S3 xlsx -> S3 xlsx)
+Description: Topia -> Equus EAFH historical assignment migration (S3 xlsx -> S3 xlsx)
 
 Parameters:
   SourceBucketName:
     Type: String
-    Description: Existing bucket where Topia Source exports land
+    Description: Existing bucket where Topia exports land
   SourcePrefix:
     Type: String
     Default: topia/incoming/

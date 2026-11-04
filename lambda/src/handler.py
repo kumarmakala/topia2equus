@@ -38,6 +38,7 @@ _s3 = None
 
 
 def s3_client():
+    """Return a lazily-created, cached boto3 S3 client (import kept out of cold start)."""
     global _s3
     if _s3 is None:
         import boto3
@@ -46,10 +47,12 @@ def s3_client():
 
 
 def _read(bucket: str, key: str) -> bytes:
+    """Read an S3 object's full body into memory."""
     return s3_client().get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
 def _load_template() -> bytes:
+    """Load the Equus template bytes from TEMPLATE_S3_URI, else the bundled copy."""
     uri = os.environ.get("TEMPLATE_S3_URI")
     if uri:
         bucket, _, key = uri.removeprefix("s3://").partition("/")
@@ -58,6 +61,7 @@ def _load_template() -> bytes:
 
 
 def _targets(event: dict) -> list[tuple[str, str, int | None]]:
+    """Extract (bucket, key, size) tuples from an S3 event or a direct invoke."""
     if "Records" in event:
         out = []
         for rec in event["Records"]:
@@ -88,6 +92,12 @@ def _accept(bucket: str, key: str, size: int | None, dest_bucket: str, dest_pref
 
 
 def lambda_handler(event, context):
+    """Lambda entry point: migrate each accepted source object and write outputs.
+
+    For every source key in the event that passes _accept, transform it into an
+    Equus workbook plus a mapping report and put both in the destination bucket.
+    Returns a per-source summary list (also logged) for direct-invoke callers.
+    """
     dest_bucket = os.environ["DEST_BUCKET"]
     dest_prefix = os.environ.get("DEST_PREFIX", "equus/")
     template = _load_template()
@@ -123,6 +133,8 @@ def lambda_handler(event, context):
             "warnings": len(report.warnings),
         }
         log.info(json.dumps(summary))
+        print(summary)
         results.append(summary)
 
     return {"results": results}
+

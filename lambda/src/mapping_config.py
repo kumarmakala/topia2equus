@@ -1,10 +1,43 @@
 """Central mapping rules for the Topia (source) -> Equus EAFH (target) migration.
 
-Everything a functional reviewer may need to change lives here, so the
-transformation code in transform.py stays generic.
+================================  HOW THE MAPPING WORKS  ======================
+Read this once and the whole migration makes sense. There are only three ideas.
 
-To stop migrating a Topia column later, add its normalised name to
-EXCLUDE_FIELDS (one line) - no code change required.
+1. THE TWO FILES
+   * Source  = the Topia export ("Topia Source" sheet). Row 1 holds the Topia
+     column names; every row below it is one assignment.
+   * Target  = the Equus EAFH import workbook. It has THREE header rows:
+         row 1  instruction hint ("Match dropdown List", "US Date Format")  <- ignored
+         row 2  friendly UI label ("First Name")
+         row 3  the real Equus DB field ("EMPLOYEE!FIRST_NAME")  <- what we fill
+     We match on the row-3 DB field and never on position, so the Equus file
+     can be reordered without breaking anything.
+
+2. ONE TOPIA COLUMN -> ONE EQUUS FIELD  (the common case)
+   FIELD_MAP below is the whole mapping: {topia column name -> Equus DB field}.
+   Names are compared in lower-case with spaces collapsed, so "First Name" and
+   "first  name" are the same. That is the entire rule for most columns.
+
+   A handful of columns are special and are handled by their own small tables
+   instead of FIELD_MAP, because one Topia column does not become one simple
+   Equus cell:
+       ADDRESS_COLUMNS      address text  -> an address child record
+       CONTACT_COLUMNS      phone numbers -> a contact child record
+       DEPENDENT_FIELD_MAP  "Child N ..." -> a dependent child record
+       EXCLUDE_FIELDS       columns we deliberately never migrate
+   Identity columns (Employee Number, Assignment Identifier) are also special;
+   see EMPLOYEE_NUMBER_SOURCE / ASSIGNMENT_IDENTIFIER_SOURCE.
+
+3. VALUE CLEAN-UP
+   Once a value lands on its Equus field, a few documented conversions run:
+   dates -> US format, country names -> ISO-3 codes (COUNTRY_ISO3), and a small
+   set of dropdown text swaps (VALUE_MAPS). Anything not listed passes through
+   untouched and is written to the mapping report so a reviewer can see it.
+
+Every Topia column that is NOT in any table above is reported as "unmapped" -
+it is never dropped silently. To stop migrating a column, add its lower-case
+name to EXCLUDE_FIELDS (one line, no code change).
+==============================================================================
 """
 
 
@@ -147,95 +180,107 @@ FIELD_MAP = {
 }
 
 
-RELABEL_HEADERS_FROM_REFERENCE = True   
-RELABEL_DB_FIELDS = True                
+RELABEL_HEADERS_FROM_REFERENCE = True
+RELABEL_DB_FIELDS = True
+
+# Drop the Equus instruction row (row 1: "Match dropdown List" / "US Date
+# Format") from the OUTPUT workbook. The UI labels then become row 1 and the DB
+# fields row 2. The instructions are only hints for a human and Schneider asked
+# that the destination file not carry them.
+DELETE_INSTRUCTION_ROW = True
 
 
+# Output header relabelling, keyed by the template row-3 DB field:
+#   DB field -> (reference DB field, reference UI label)
+# The reference DB field lets a few columns correct their spelling
+# (e.g. FROM_COMPANY_SEGMENT_LEVEL_1 -> FROM_COMPANY_LEVEL1). The row-1
+# instruction hint is deliberately NOT stored here - it is dropped from
+# the output entirely (see DELETE_INSTRUCTION_ROW).
 HEADER_MAP = {
-    'EMPLOYEE!FIRST_NAME': ('EMPLOYEE!FIRST_NAME', 'First Name', None),
-    'EMPLOYEE!LAST_NAME': ('EMPLOYEE!LAST_NAME', 'Last Name', None),
-    'EMPLOYEE!MIDDLE_NAME': ('EMPLOYEE!MIDDLE_NAME', 'Middle Name', None),
-    'EMPLOYEE!USER_ID_EMAIL': ('EMPLOYEE!USER_ID_EMAIL', 'Email Address', None),
-    'EMPLOYEE_CF!CF_TEXT008': ('EMPLOYEE_CF!CF_TEXT008', 'Alternate Email Address', None),
-    'EMPLOYEE!GENDER': ('EMPLOYEE!GENDER', 'Gender', 'Match dropdown List'),
-    'EMPLOYEE!BIRTH_DATE': ('EMPLOYEE!BIRTH_DATE', 'Birth Date', 'US Date Format'),
-    'EMPLOYEE!MARITAL_STATUS': ('EMPLOYEE!MARITAL_STATUS', 'Marital Status', None),
-    'EMPLOYEE_CF!CF_TEXT002': ('EMPLOYEE_CF!CF_TEXT002', 'Primary Nationality', None),
-    'EMPLOYEE_CF!CF_TEXT005': ('EMPLOYEE_CF!CF_TEXT005', 'Secondary Nationality', None),
-    'EMPLOYEE!PRIMARY_CITIZENSHIP': ('EMPLOYEE!PRIMARY_CITIZENSHIP', 'Primary Citizenship', 'Match dropdown List'),
-    'EMPLOYEE!SECONDARY_CITIZENSHIP': ('EMPLOYEE!SECONDARY_CITIZENSHIP', 'Secondary Citizenship', 'Match dropdown List'),
-    'EMPLOYEE!BIRTH_COUNTRY': ('EMPLOYEE!BIRTH_COUNTRY', 'Country of Birth', 'Match dropdown List'),
-    'EMPLOYEE!TYPE': ('EMPLOYEE!TYPE', None, 'Match dropdown list'),
-    'ASSIGNMENT_CF!CF_TEXT014': ('ASSIGNMENT_CF!CF_TEXT014', 'Career Level', None),
-    'EMPLOYEE!EMPLOYMENT_STATUS': ('EMPLOYEE!EMPLOYMENT_STATUS', 'Employment Status', 'Match dropdown List'),
-    'ASSIGNMENT!TYPE': ('ASSIGNMENT!TYPE', 'Mobility Type', 'Match dropdown List'),
-    'ASSIGNMENT!RELOCATION_POLICY_ID': ('ASSIGNMENT!RELOCATION_POLICY_ID', 'Mobility Policy', 'Match dropdown List'),
-    'ASSIGNMENT_CF!CF_NUMBER001': ('ASSIGNMENT_CF!CF_NUMBER001', 'Number of payroll installment - Home', None),
-    'ASSIGNMENT_CF!CF_NUMBER002': ('ASSIGNMENT_CF!CF_NUMBER002', 'Number of payroll installment - Host', None),
-    'ASSIGNMENT!START_DATE': ('ASSIGNMENT!START_DATE', 'Start Date', 'US Date Format'),
-    'ASSIGNMENT!ACTUAL_END_DATE': ('ASSIGNMENT!ACTUAL_END_DATE', 'Actual End Date', 'US Date Format'),
-    'ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE': ('ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE', 'Home Country Departure Date', 'US Date Format'),
-    'ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE': ('ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE', 'Host Country Arrival Date', 'US Date Format'),
-    'ASSIGNMENT!FROM_COUNTRY': ('ASSIGNMENT!FROM_COUNTRY', 'From Country', 'Match dropdown List - Country Code'),
-    'ASSIGNMENT!FROM_CITY': ('ASSIGNMENT!FROM_CITY', 'From City', None),
-    'ASSIGNMENT!FROM_STATE_PROVINCE': ('ASSIGNMENT!FROM_STATE_PROVINCE', 'From State/Province', 'Match dropdown List - State Name'),
-    'ASSIGNMENT!TO_COUNTRY': ('ASSIGNMENT!TO_COUNTRY', 'To Country', 'Match dropdown List - Country Code'),
-    'ASSIGNMENT!TO_CITY': ('ASSIGNMENT!TO_CITY', 'To City', None),
-    'ASSIGNMENT!TO_STATE_PROVINCE': ('ASSIGNMENT!TO_STATE_PROVINCE', 'To State/Province', 'Match dropdown List - State Name'),
-    'ASSIGNMENT_CF!CF_TEXT005': ('ASSIGNMENT_CF!CF_TEXT005', 'Home Cost Center', 'Match dropdown list'),
-    'ASSIGNMENT_CF!CF_TEXT012': ('ASSIGNMENT_CF!CF_TEXT012', 'Host Cost Center', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_1': ('ASSIGNMENT!FROM_COMPANY_LEVEL1', 'From Legal Entity', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_2': ('ASSIGNMENT!FROM_COMPANY_LEVEL2', 'From Region', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_3': ('ASSIGNMENT!FROM_COMPANY_LEVEL3', 'From Business Unit', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_4': ('ASSIGNMENT!FROM_COMPANY_LEVEL4', 'From Department', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_TITLE': ('ASSIGNMENT!FROM_TITLE', 'Home Job Title', 'Match dropdown list'),
-    'ASSIGNMENT!FROM_SALARY_GRADE': ('ASSIGNMENT!FROM_SALARY_GRADE', 'Home Job Grade', 'Match dropdown list'),
-    'ASSIGNMENT_CF!CF_TEXT002': ('ASSIGNMENT_CF!CF_TEXT002', 'Home Job Profile', None),
-    'ASSIGNMENT_CF!CF_TEXT008': ('ASSIGNMENT_CF!CF_TEXT008', 'Home Position Time Type', None),
-    'ASSIGNMENT_CF!CF_TEXT007': ('ASSIGNMENT_CF!CF_TEXT007', 'Home Job Level', None),
-    'ASSIGNMENT_CF!CF_TEXT006': ('ASSIGNMENT_CF!CF_TEXT006', 'Home Office Location', None),
-    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_1': ('ASSIGNMENT!TO_COMPANY_LEVEL1', 'To Legal Entity', 'Match dropdown list'),
-    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_2': ('ASSIGNMENT!TO_COMPANY_LEVEL2', 'To Region', 'Match dropdown list'),
-    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_3': ('ASSIGNMENT!TO_COMPANY_LEVEL3', 'To Business Unit', 'Match dropdown list'),
-    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_4': ('ASSIGNMENT!TO_COMPANY_LEVEL4', 'To Department', 'Match dropdown list'),
-    'ASSIGNMENT!TO_TITLE': ('ASSIGNMENT!TO_TITLE', 'Host Job Title', 'Match dropdown list'),
-    'ASSIGNMENT_CF!CF_TEXT009': ('ASSIGNMENT_CF!CF_TEXT009', 'Host Job Profile', None),
-    'ASSIGNMENT_CF!CF_NUMBER003': ('ASSIGNMENT_CF!CF_NUMBER003', 'Host Working Hours', None),
-    'ASSIGNMENT_CF!CF_TEXT013': ('ASSIGNMENT_CF!CF_TEXT013', 'Host Office Location', None),
-    'ASSIGNMENT_CF!CF_TEXT011': ('ASSIGNMENT_CF!CF_TEXT011', 'Host HFM Code', 'Match dropdown list'),
-    'ASSIGNMENT!VIP': ('ASSIGNMENT!VIP', 'VIP', 'Checkbox'),
-    'EMPLOYEE_CF!CF_TEXT001': ('EMPLOYEE_CF!CF_TEXT001', 'SESA ID', None),
-    'ASSIGNMENT!HOMEOWNER': ('ASSIGNMENT!HOMEOWNER', 'Home Owner Field', 'Yes/No'),
-    'ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID': ('ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID', 'Mobility Coordinator', 'Match Resource dropdown list'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID', 'Home HRBP', 'Match Resource dropdown'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID', 'Host HRBP', 'Match Resource dropdown'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID', 'Home Manager?', None),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID', 'Host Manager?', None),
-    'ASSIGNMENT!GROUP_NAME': ('ASSIGNMENT!GROUP', 'Assignment: Group', None),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID', 'Move Initiator', 'Match Resource dropdown'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID', 'Onsite Consultant', None),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID', 'Host IMP Resource', 'Match Resource dropdown'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID', 'Resource', 'Match Resource dropdown'),
-    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID', 'Executive Rewards', None),
-    'ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE': ('ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE', None, None),
-    'ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS': ('ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS', 'Employee Contact', None),
-    'UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING': ('UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING', None, None),
-    'UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS': ('UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS', 'Cost Estimate Additional Inputs Screen', None),
-    'ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001': ('ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001', 'Home STIP %', None),
-    'ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002': ('ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002', 'Host STIP %', None),
-    'UT_CALCULATION_INPUT!FAMILY_ALLOWANCE': ('UT_CALCULATION_INPUT!FAMILY_ALLOWANCE', 'Cost Estimate Additional Inputs', None),
-    'ASSIGNMENT_CF!CF_TEXT004': ('ASSIGNMENT_CF!CF_TEXT004', 'Assignment CF', 'Match dropdown list'),
-    'ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR': ('ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR', 'Home Annual Vacation Days', None),
-    'ASSIGNMENT!RELOCATION_REASON': ('ASSIGNMENT!RELOCATION_REASON', 'Mobility Reason', 'Match dropdown'),
-    'EMPLOYEE!HIRE_DATE': ('EMPLOYEE!HIRE_DATE', 'Original Hire Date', None),
-    'ASSIGNMENT!DEFAULT_CURRENCY': ('ASSIGNMENT!DEFAULT_CURRENCY', 'Default Currency', None),
-    'UT_CALCULATION_INPUT!RMC': ('UT_CALCULATION_INPUT!RMC', 'RMC they use', None),
-    'SPOUSE_DOMESTIC_PARTNER!LAST_NAME': ('SPOUSE_DOMESTIC_PARTNER!LAST_NAME', None, None),
-    'SPOUSE_DOMESTIC_PARTNER!FIRST_NAME': ('SPOUSE_DOMESTIC_PARTNER!FIRST_NAME', 'Spouse/Domestic Partner', None),
-    'SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP': ('SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP', None, None),
-    'SPOUSE_DOMESTIC_PARTNER!STATUS': ('SPOUSE_DOMESTIC_PARTNER!STATUS', None, None),
-    'SPOUSE_DOMESTIC_PARTNER!GENDER': ('SPOUSE_DOMESTIC_PARTNER!GENDER', None, None),
-    'SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE': ('SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE', None, None),
+    'EMPLOYEE!FIRST_NAME': ('EMPLOYEE!FIRST_NAME', 'First Name'),
+    'EMPLOYEE!LAST_NAME': ('EMPLOYEE!LAST_NAME', 'Last Name'),
+    'EMPLOYEE!MIDDLE_NAME': ('EMPLOYEE!MIDDLE_NAME', 'Middle Name'),
+    'EMPLOYEE!USER_ID_EMAIL': ('EMPLOYEE!USER_ID_EMAIL', 'Email Address'),
+    'EMPLOYEE_CF!CF_TEXT008': ('EMPLOYEE_CF!CF_TEXT008', 'Alternate Email Address'),
+    'EMPLOYEE!GENDER': ('EMPLOYEE!GENDER', 'Gender'),
+    'EMPLOYEE!BIRTH_DATE': ('EMPLOYEE!BIRTH_DATE', 'Birth Date'),
+    'EMPLOYEE!MARITAL_STATUS': ('EMPLOYEE!MARITAL_STATUS', 'Marital Status'),
+    'EMPLOYEE_CF!CF_TEXT002': ('EMPLOYEE_CF!CF_TEXT002', 'Primary Nationality'),
+    'EMPLOYEE_CF!CF_TEXT005': ('EMPLOYEE_CF!CF_TEXT005', 'Secondary Nationality'),
+    'EMPLOYEE!PRIMARY_CITIZENSHIP': ('EMPLOYEE!PRIMARY_CITIZENSHIP', 'Primary Citizenship'),
+    'EMPLOYEE!SECONDARY_CITIZENSHIP': ('EMPLOYEE!SECONDARY_CITIZENSHIP', 'Secondary Citizenship'),
+    'EMPLOYEE!BIRTH_COUNTRY': ('EMPLOYEE!BIRTH_COUNTRY', 'Country of Birth'),
+    'EMPLOYEE!TYPE': ('EMPLOYEE!TYPE', None),
+    'ASSIGNMENT_CF!CF_TEXT014': ('ASSIGNMENT_CF!CF_TEXT014', 'Career Level'),
+    'EMPLOYEE!EMPLOYMENT_STATUS': ('EMPLOYEE!EMPLOYMENT_STATUS', 'Employment Status'),
+    'ASSIGNMENT!TYPE': ('ASSIGNMENT!TYPE', 'Mobility Type'),
+    'ASSIGNMENT!RELOCATION_POLICY_ID': ('ASSIGNMENT!RELOCATION_POLICY_ID', 'Mobility Policy'),
+    'ASSIGNMENT_CF!CF_NUMBER001': ('ASSIGNMENT_CF!CF_NUMBER001', 'Number of payroll installment - Home'),
+    'ASSIGNMENT_CF!CF_NUMBER002': ('ASSIGNMENT_CF!CF_NUMBER002', 'Number of payroll installment - Host'),
+    'ASSIGNMENT!START_DATE': ('ASSIGNMENT!START_DATE', 'Start Date'),
+    'ASSIGNMENT!ACTUAL_END_DATE': ('ASSIGNMENT!ACTUAL_END_DATE', 'Actual End Date'),
+    'ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE': ('ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE', 'Home Country Departure Date'),
+    'ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE': ('ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE', 'Host Country Arrival Date'),
+    'ASSIGNMENT!FROM_COUNTRY': ('ASSIGNMENT!FROM_COUNTRY', 'From Country'),
+    'ASSIGNMENT!FROM_CITY': ('ASSIGNMENT!FROM_CITY', 'From City'),
+    'ASSIGNMENT!FROM_STATE_PROVINCE': ('ASSIGNMENT!FROM_STATE_PROVINCE', 'From State/Province'),
+    'ASSIGNMENT!TO_COUNTRY': ('ASSIGNMENT!TO_COUNTRY', 'To Country'),
+    'ASSIGNMENT!TO_CITY': ('ASSIGNMENT!TO_CITY', 'To City'),
+    'ASSIGNMENT!TO_STATE_PROVINCE': ('ASSIGNMENT!TO_STATE_PROVINCE', 'To State/Province'),
+    'ASSIGNMENT_CF!CF_TEXT005': ('ASSIGNMENT_CF!CF_TEXT005', 'Home Cost Center'),
+    'ASSIGNMENT_CF!CF_TEXT012': ('ASSIGNMENT_CF!CF_TEXT012', 'Host Cost Center'),
+    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_1': ('ASSIGNMENT!FROM_COMPANY_LEVEL1', 'From Legal Entity'),
+    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_2': ('ASSIGNMENT!FROM_COMPANY_LEVEL2', 'From Region'),
+    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_3': ('ASSIGNMENT!FROM_COMPANY_LEVEL3', 'From Business Unit'),
+    'ASSIGNMENT!FROM_COMPANY_SEGMENT_LEVEL_4': ('ASSIGNMENT!FROM_COMPANY_LEVEL4', 'From Department'),
+    'ASSIGNMENT!FROM_TITLE': ('ASSIGNMENT!FROM_TITLE', 'Home Job Title'),
+    'ASSIGNMENT!FROM_SALARY_GRADE': ('ASSIGNMENT!FROM_SALARY_GRADE', 'Home Job Grade'),
+    'ASSIGNMENT_CF!CF_TEXT002': ('ASSIGNMENT_CF!CF_TEXT002', 'Home Job Profile'),
+    'ASSIGNMENT_CF!CF_TEXT008': ('ASSIGNMENT_CF!CF_TEXT008', 'Home Position Time Type'),
+    'ASSIGNMENT_CF!CF_TEXT007': ('ASSIGNMENT_CF!CF_TEXT007', 'Home Job Level'),
+    'ASSIGNMENT_CF!CF_TEXT006': ('ASSIGNMENT_CF!CF_TEXT006', 'Home Office Location'),
+    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_1': ('ASSIGNMENT!TO_COMPANY_LEVEL1', 'To Legal Entity'),
+    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_2': ('ASSIGNMENT!TO_COMPANY_LEVEL2', 'To Region'),
+    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_3': ('ASSIGNMENT!TO_COMPANY_LEVEL3', 'To Business Unit'),
+    'ASSIGNMENT!TO_COMPANY_SEGMENT_LEVEL_4': ('ASSIGNMENT!TO_COMPANY_LEVEL4', 'To Department'),
+    'ASSIGNMENT!TO_TITLE': ('ASSIGNMENT!TO_TITLE', 'Host Job Title'),
+    'ASSIGNMENT_CF!CF_TEXT009': ('ASSIGNMENT_CF!CF_TEXT009', 'Host Job Profile'),
+    'ASSIGNMENT_CF!CF_NUMBER003': ('ASSIGNMENT_CF!CF_NUMBER003', 'Host Working Hours'),
+    'ASSIGNMENT_CF!CF_TEXT013': ('ASSIGNMENT_CF!CF_TEXT013', 'Host Office Location'),
+    'ASSIGNMENT_CF!CF_TEXT011': ('ASSIGNMENT_CF!CF_TEXT011', 'Host HFM Code'),
+    'ASSIGNMENT!VIP': ('ASSIGNMENT!VIP', 'VIP'),
+    'EMPLOYEE_CF!CF_TEXT001': ('EMPLOYEE_CF!CF_TEXT001', 'SESA ID'),
+    'ASSIGNMENT!HOMEOWNER': ('ASSIGNMENT!HOMEOWNER', 'Home Owner Field'),
+    'ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID': ('ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID', 'Mobility Coordinator'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID', 'Home HRBP'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID', 'Host HRBP'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID', 'Home Manager?'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID', 'Host Manager?'),
+    'ASSIGNMENT!GROUP_NAME': ('ASSIGNMENT!GROUP', 'Assignment: Group'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID', 'Move Initiator'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID', 'Onsite Consultant'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID', 'Host IMP Resource'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID', 'Resource'),
+    'ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID': ('ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID', 'Executive Rewards'),
+    'ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE': ('ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE', None),
+    'ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS': ('ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS', 'Employee Contact'),
+    'UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING': ('UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING', None),
+    'UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS': ('UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS', 'Cost Estimate Additional Inputs Screen'),
+    'ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001': ('ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001', 'Home STIP %'),
+    'ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002': ('ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002', 'Host STIP %'),
+    'UT_CALCULATION_INPUT!FAMILY_ALLOWANCE': ('UT_CALCULATION_INPUT!FAMILY_ALLOWANCE', 'Cost Estimate Additional Inputs'),
+    'ASSIGNMENT_CF!CF_TEXT004': ('ASSIGNMENT_CF!CF_TEXT004', 'Assignment CF'),
+    'ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR': ('ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR', 'Home Annual Vacation Days'),
+    'ASSIGNMENT!RELOCATION_REASON': ('ASSIGNMENT!RELOCATION_REASON', 'Mobility Reason'),
+    'EMPLOYEE!HIRE_DATE': ('EMPLOYEE!HIRE_DATE', 'Original Hire Date'),
+    'ASSIGNMENT!DEFAULT_CURRENCY': ('ASSIGNMENT!DEFAULT_CURRENCY', 'Default Currency'),
+    'UT_CALCULATION_INPUT!RMC': ('UT_CALCULATION_INPUT!RMC', 'RMC they use'),
+    'SPOUSE_DOMESTIC_PARTNER!LAST_NAME': ('SPOUSE_DOMESTIC_PARTNER!LAST_NAME', None),
+    'SPOUSE_DOMESTIC_PARTNER!FIRST_NAME': ('SPOUSE_DOMESTIC_PARTNER!FIRST_NAME', 'Spouse/Domestic Partner'),
+    'SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP': ('SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP', None),
+    'SPOUSE_DOMESTIC_PARTNER!STATUS': ('SPOUSE_DOMESTIC_PARTNER!STATUS', None),
+    'SPOUSE_DOMESTIC_PARTNER!GENDER': ('SPOUSE_DOMESTIC_PARTNER!GENDER', None),
+    'SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE': ('SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE', None),
 }
 
 # Normalised Topia headers to NEVER migrate, even if present in FIELD_MAP.
@@ -360,8 +405,12 @@ US Virgin Islands|VIR Yemen|YEM Zambia|ZMB Zimbabwe|ZWE
 
 
 def _parse_countries(text):
+    """Build a {lower-case country name -> ISO-3 code} lookup from the block above.
+
+    Entries are written "Name|ISO" (names may contain spaces), so we split on
+    the three-letter ISO code rather than on whitespace.
+    """
     table = {}
-    # Entries are "Name|ISO"; names contain spaces, so split on the ISO code.
     for name, iso in _re.findall(r"\s*(.+?)\|([A-Z]{3})", text):
         table[name.strip().lower()] = iso
     return table
