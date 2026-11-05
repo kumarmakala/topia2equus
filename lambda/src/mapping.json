@@ -1,0 +1,304 @@
+{
+  "sheet_name": null,
+  "header_row": 1,
+  "output_sheet_name": "Employees Data",
+  "employee_id": {
+    "source_column": "Employee ID",
+    "target_column": "EMPLOYEE!SYSTEM_NUMBER"
+  },
+  "employee_column_mapping": {
+    "First Name": "EMPLOYEE!FIRST_NAME",
+    "Last Name": "EMPLOYEE!LAST_NAME",
+    "Middle Name": "EMPLOYEE!MIDDLE_NAME",
+    "Employee ID": "EMPLOYEE!SYSTEM_NUMBER",
+    "Email": "EMPLOYEE!USER_ID_EMAIL",
+    "Alternate Email": "EMPLOYEE_CF!CF_TEXT008",
+    "Gender": "EMPLOYEE!GENDER",
+    "Date of Birth": "EMPLOYEE!BIRTH_DATE",
+    "Marital Status": "EMPLOYEE!MARITAL_STATUS",
+    "Nationality 1": "EMPLOYEE_CF!CF_TEXT002",
+    "Nationality 2": "EMPLOYEE_CF!CF_TEXT005",
+    "Citizenship 1": "EMPLOYEE!PRIMARY_CITIZENSHIP",
+    "Citizenship 2": "EMPLOYEE!SECONDARY_CITIZENSHIP",
+    "Country of Birth": "EMPLOYEE!BIRTH_COUNTRY",
+    "Person Status": "EMPLOYEE!TYPE",
+    "Business Title": "ASSIGNMENT_CF!CF_TEXT014",
+    "Employment Status": "EMPLOYEE!EMPLOYMENT_STATUS",
+    "Assignment Type": "ASSIGNMENT!TYPE",
+    "Assignment Type Category": "ASSIGNMENT!RELOCATION_POLICY_ID",
+    "Home Pay Installments": "ASSIGNMENT_CF!CF_NUMBER001",
+    "Host Pay Installments": "ASSIGNMENT_CF!CF_NUMBER002",
+    "Assignment Start Date": "ASSIGNMENT!START_DATE",
+    "Assignment End Date": "ASSIGNMENT!ACTUAL_END_DATE",
+    "Departure Date": "ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE",
+    "Arrival Date": "ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE",
+    "Home Country": "ASSIGNMENT!FROM_COUNTRY",
+    "Home City": "ASSIGNMENT!FROM_CITY",
+    "Home State": "ASSIGNMENT!FROM_STATE_PROVINCE",
+    "Host Country": "ASSIGNMENT!TO_COUNTRY",
+    "Host City": "ASSIGNMENT!TO_CITY",
+    "Host State": "ASSIGNMENT!TO_STATE_PROVINCE",
+    "Home Cost Center Code": "ASSIGNMENT_CF!CF_TEXT005",
+    "Host Cost Center Code": "ASSIGNMENT_CF!CF_TEXT012",
+    "Home Entity": "ASSIGNMENT!FROM_COMPANY_LEVEL1",
+    "Home Division": "ASSIGNMENT!FROM_COMPANY_LEVEL4",
+    "Home Business Line": "ASSIGNMENT!FROM_COMPANY_LEVEL3",
+    "Home Role Region": "ASSIGNMENT!FROM_COMPANY_LEVEL2",
+    "Home Job Title": "ASSIGNMENT!FROM_TITLE",
+    "Home Job Level": "ASSIGNMENT!FROM_SALARY_GRADE",
+    "Home Job Profile": "ASSIGNMENT_CF!CF_TEXT002",
+    "Home Position": "ASSIGNMENT_CF!CF_TEXT008",
+    "Home Employment Type": "ASSIGNMENT_CF!CF_TEXT007",
+    "Home Office Location": "ASSIGNMENT_CF!CF_TEXT006",
+    "Host Entity": "ASSIGNMENT!TO_COMPANY_LEVEL1",
+    "Host Division": "ASSIGNMENT!TO_COMPANY_LEVEL4",
+    "Host Business Line": "ASSIGNMENT!TO_COMPANY_LEVEL3",
+    "Host Role Region": "ASSIGNMENT!TO_COMPANY_LEVEL2",
+    "Host Job Title": "ASSIGNMENT!TO_TITLE",
+    "Host Job Level": "ASSIGNMENT!TO_TITLE",
+    "Host Job Profile": "ASSIGNMENT_CF!CF_TEXT009",
+    "Host Scheduled Weekly Hours": "ASSIGNMENT_CF!CF_NUMBER003",
+    "Host Office Location": "ASSIGNMENT_CF!CF_TEXT013",
+    "Host Supervisory Organization": "ASSIGNMENT_CF!CF_TEXT011",
+    "VIP Flag": "ASSIGNMENT!VIP",
+    "Host Employee ID": "EMPLOYEE_CF!CF_TEXT001",
+    "Home Owner Status": "ASSIGNMENT!HOMEOWNER",
+    "Primary Mobility Contact": "ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID",
+    "HR Advisor Home Name": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID",
+    "HR Advisor Host Name": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID",
+    "Line Manager Home Name": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID",
+    "Line Manager Host Name": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID",
+    "Group Name": "ASSIGNMENT!GROUP",
+    "Move Initiator Name": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID",
+    "Relocation Contact": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID",
+    "Mobility Host Contact (IMP)": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID",
+    "HR Leader Host (Host HR SVP)": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID",
+    "Employee Benefits Manager - Host": "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID",
+    "Talent Profile": "UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING",
+    "Primary reasons for selecting this employee for the role (Business Justification)": "UT_GOVERNANCE_QUESTIONNAIRE2!PURPOSE",
+    "Home Annualized Base Pay Currency": "ASSIGNMENT_COMPENSATION_SALARY_CF!CF_MONEY001",
+    "Home Annualized Bse Pay Amount": "ASSIGNMENT_COMPENSATION_SALARY_CF!CF_MONEY001",
+    "Host Annualized Base Pay Amount": "ASSIGNMENT!OFFER_SALARY",
+    "Host Annualized Base Pay Currency": "ASSIGNMENT!OFFER_SALARY_CURRENCY",
+    "Host Other Benefits Deduction Currency": "UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS",
+    "Host Other Benefits Deduction Amount": "UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS",
+    "Home Target Bonus %": "ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001",
+    "Host Target Bonus %": "ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002",
+    "Home Family Allowance Currency": "UT_CALCULATION_INPUT!FAMILY_ALLOWANCE",
+    "Home HFM Code": "ASSIGNMENT_CF!CF_TEXT004",
+    "Home Annual Vacation Days": "ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR",
+    "Mobility Driver": "ASSIGNMENT!RELOCATION_REASON",
+    "Original Hire Date": "EMPLOYEE!HIRE_DATE",
+    "Spouse First Name": "SPOUSE_DOMESTIC_PARTNER!FIRST_NAME",
+    "Spouse Last Name": "SPOUSE_DOMESTIC_PARTNER!LAST_NAME",
+    "Spouse Gender": "SPOUSE_DOMESTIC_PARTNER!GENDER",
+    "Spouse Date of Birth": "SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE",
+    "Spouse Relationship": "SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP",
+    "Spouse At Host": "SPOUSE_DOMESTIC_PARTNER!STATUS"
+  },
+  "child_target_columns": {
+    "child": "ASSIGNMENT_DEPENDENT!FIRST_NAME",
+    "gender": "ASSIGNMENT_DEPENDENT!GENDER"
+  },
+  "child_slots": [
+    {
+      "slot_number": 1,
+      "child_source_column": "Child 1",
+      "gender_source_column": "Child 1 Gender"
+    },
+    {
+      "slot_number": 2,
+      "child_source_column": "Child 2",
+      "gender_source_column": "Child 2 Gender"
+    },
+    {
+      "slot_number": 3,
+      "child_source_column": "Child 3",
+      "gender_source_column": "Child 3 Gender"
+    }
+  ],
+  "location_target_columns": {
+    "location_type": "ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE"
+  },
+  "location_slots": [
+    {
+      "slot_number": 1,
+      "location_source_column": "Location Type - Personal Home Address"
+    },
+    {
+      "slot_number": 2,
+      "location_source_column": "Location Type - Personal Host Address"
+    },
+    {
+      "slot_number": 3,
+      "location_source_column": "Location Type - Work Host Address"
+    },
+    {
+      "slot_number": 4,
+      "location_source_column": "Location Type - Work Home Address"
+    }
+  ],
+  "phone_target_columns": {
+    "number": "ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS"
+  },
+  "phone_slots": [
+    {
+      "slot_number": 1,
+      "phone_source_column": "Phone Number"
+    },
+    {
+      "slot_number": 2,
+      "phone_source_column": "Mobile Phone Number"
+    }
+  ],
+  "ignore_columns": [
+    "Employee Full Name"
+  ],
+  "required_source_columns": [
+    "Employee ID",
+    "First Name",
+    "Last Name",
+    "Email"
+  ],
+  "output_column_order": [
+    "EMPLOYEE!SYSTEM_NUMBER",
+    "EMPLOYEE!FIRST_NAME",
+    "EMPLOYEE!LAST_NAME",
+    "EMPLOYEE!MIDDLE_NAME",
+    "EMPLOYEE!USER_ID_EMAIL",
+    "EMPLOYEE_CF!CF_TEXT008",
+    "EMPLOYEE!GENDER",
+    "EMPLOYEE!BIRTH_DATE",
+    "EMPLOYEE!MARITAL_STATUS",
+    "EMPLOYEE_CF!CF_TEXT002",
+    "EMPLOYEE_CF!CF_TEXT005",
+    "EMPLOYEE!PRIMARY_CITIZENSHIP",
+    "EMPLOYEE!SECONDARY_CITIZENSHIP",
+    "EMPLOYEE!BIRTH_COUNTRY",
+    "EMPLOYEE!TYPE",
+    "ASSIGNMENT_CF!CF_TEXT014",
+    "EMPLOYEE!EMPLOYMENT_STATUS",
+    "ASSIGNMENT!TYPE",
+    "ASSIGNMENT!RELOCATION_POLICY_ID",
+    "ASSIGNMENT_CF!CF_NUMBER001",
+    "ASSIGNMENT_CF!CF_NUMBER002",
+    "ASSIGNMENT!START_DATE",
+    "ASSIGNMENT!ACTUAL_END_DATE",
+    "ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE",
+    "ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE",
+    "ASSIGNMENT!FROM_COUNTRY",
+    "ASSIGNMENT!FROM_CITY",
+    "ASSIGNMENT!FROM_STATE_PROVINCE",
+    "ASSIGNMENT!TO_COUNTRY",
+    "ASSIGNMENT!TO_CITY",
+    "ASSIGNMENT!TO_STATE_PROVINCE",
+    "ASSIGNMENT_CF!CF_TEXT005",
+    "ASSIGNMENT_CF!CF_TEXT012",
+    "ASSIGNMENT!FROM_COMPANY_LEVEL1",
+    "ASSIGNMENT!FROM_COMPANY_LEVEL4",
+    "ASSIGNMENT!FROM_COMPANY_LEVEL3",
+    "ASSIGNMENT!FROM_COMPANY_LEVEL2",
+    "ASSIGNMENT!FROM_TITLE",
+    "ASSIGNMENT!FROM_SALARY_GRADE",
+    "ASSIGNMENT_CF!CF_TEXT002",
+    "ASSIGNMENT_CF!CF_TEXT008",
+    "ASSIGNMENT_CF!CF_TEXT007",
+    "ASSIGNMENT_CF!CF_TEXT006",
+    "ASSIGNMENT!TO_COMPANY_LEVEL1",
+    "ASSIGNMENT!TO_COMPANY_LEVEL4",
+    "ASSIGNMENT!TO_COMPANY_LEVEL3",
+    "ASSIGNMENT!TO_COMPANY_LEVEL2",
+    "ASSIGNMENT!TO_TITLE",
+    "ASSIGNMENT!TO_TITLE",
+    "ASSIGNMENT_CF!CF_TEXT009",
+    "ASSIGNMENT_CF!CF_NUMBER003",
+    "ASSIGNMENT_CF!CF_TEXT013",
+    "ASSIGNMENT_CF!CF_TEXT011",
+    "ASSIGNMENT!VIP",
+    "EMPLOYEE_CF!CF_TEXT001",
+    "ASSIGNMENT!HOMEOWNER",
+    "ASSIGNMENT!COORDINATOR_RESOURCE_ASSIGNMENT_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE1_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE2_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE3_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE4_ID",
+    "ASSIGNMENT!GROUP",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE11_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE12_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE10_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE6_ID",
+    "ASSIGNMENT!ASSIGNMENT_ADDTL_RESOURCE13_ID",
+    "UT_GOVERNANCE_QUESTIONNAIRE2!TALENT_RATING",
+    "UT_GOVERNANCE_QUESTIONNAIRE2!PURPOSE",
+    "ASSIGNMENT_COMPENSATION_SALARY_CF!CF_MONEY001",
+    "ASSIGNMENT_COMPENSATION_SALARY_CF!CF_MONEY001",
+    "ASSIGNMENT!OFFER_SALARY",
+    "ASSIGNMENT!OFFER_SALARY_CURRENCY",
+    "UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS",
+    "UT_CALCULATION_INPUT!EMPLOYEE_ELECTED_BENEFITS",
+    "ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER001",
+    "ASSIGNMENT_COMPENSATION_POLICY_CF!CF_NUMBER002",
+    "UT_CALCULATION_INPUT!FAMILY_ALLOWANCE",
+    "ASSIGNMENT_CF!CF_TEXT004",
+    "ASSIGNMENT_COMPENSATION_POLICY!VACATION_DAYS_PER_YEAR",
+    "ASSIGNMENT!RELOCATION_REASON",
+    "EMPLOYEE!HIRE_DATE",
+    "SPOUSE_DOMESTIC_PARTNER!FIRST_NAME",
+    "SPOUSE_DOMESTIC_PARTNER!LAST_NAME",
+    "SPOUSE_DOMESTIC_PARTNER!GENDER",
+    "SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE",
+    "SPOUSE_DOMESTIC_PARTNER!RELATIONSHIP",
+    "SPOUSE_DOMESTIC_PARTNER!STATUS",
+    "ASSIGNMENT_DEPENDENT!FIRST_NAME",
+    "ASSIGNMENT_DEPENDENT!GENDER",
+    "ASSIGNMENT_MAILING_ADDRESS!LOCATION_TYPE",
+    "ASSIGNMENT_EMPLOYEE_CONTACT!NUMBER_ADDRESS"
+  ],
+  "text_output_columns": [
+    "EMPLOYEE!SYSTEM_NUMBER"
+  ],
+  "date_output_columns": [
+    "EMPLOYEE!BIRTH_DATE",
+    "ASSIGNMENT!START_DATE",
+    "ASSIGNMENT!ACTUAL_END_DATE",
+    "ASSIGNMENT!HOME_COUNTRY_DEPARTURE_DATE",
+    "ASSIGNMENT!HOST_COUNTRY_ARRIVAL_DATE",
+    "EMPLOYEE!HIRE_DATE",
+    "SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE"
+  ],
+  "value_mappings": {
+    "EMPLOYEE!GENDER": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "error",
+      "values": {
+        "Male": "M",
+        "Female": "F"
+      }
+    },
+    "EMPLOYEE!MARITAL_STATUS": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "blank",
+      "values": {
+        "Single": "S",
+        "Married": "M",
+        "Divorced": "D",
+        "Widowed": "W"
+      }
+    },
+    "ASSIGNMENT_DEPENDENT!GENDER": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "error",
+      "values": {
+        "Male": "M",
+        "Female": "F",
+        "Boy": "M",
+        "Girl": "F",
+        "M": "M",
+        "F": "F"
+      }
+    }
+  }
+}
