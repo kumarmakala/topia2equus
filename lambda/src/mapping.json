@@ -1,7 +1,7 @@
 {
   "sheet_name": null,
   "header_row": 1,
-  "output_sheet_name": "Employees Data",
+  "output_sheet_name": "Full Historical Past Assignment",
   "employee_id": {
     "source_column": "Employee ID",
     "target_column": "EMPLOYEE!SYSTEM_NUMBER"
@@ -161,10 +161,10 @@
     "Email"
   ],
   "output_column_order": [
-    "EMPLOYEE!SYSTEM_NUMBER",
     "EMPLOYEE!FIRST_NAME",
     "EMPLOYEE!LAST_NAME",
     "EMPLOYEE!MIDDLE_NAME",
+    "EMPLOYEE!SYSTEM_NUMBER",
     "EMPLOYEE!USER_ID_EMAIL",
     "EMPLOYEE_CF!CF_TEXT008",
     "EMPLOYEE!GENDER",
@@ -266,6 +266,13 @@
     "EMPLOYEE!HIRE_DATE",
     "SPOUSE_DOMESTIC_PARTNER!BIRTH_DATE"
   ],
+  "iso3_country_fields": [
+    "EMPLOYEE!PRIMARY_CITIZENSHIP",
+    "EMPLOYEE!SECONDARY_CITIZENSHIP",
+    "EMPLOYEE!BIRTH_COUNTRY",
+    "ASSIGNMENT!FROM_COUNTRY",
+    "ASSIGNMENT!TO_COUNTRY"
+  ],
   "value_mappings": {
     "EMPLOYEE!GENDER": {
       "case_sensitive": false,
@@ -299,6 +306,137 @@
         "M": "M",
         "F": "F"
       }
+    },
+    "EMPLOYEE!TYPE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {
+        "employee": "Employee",
+        "user": "User"
+      }
+    },
+    "EMPLOYEE!EMPLOYMENT_STATUS": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {
+        "Employed": "Active"
+      }
+    },
+    "ASSIGNMENT!TYPE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!RELOCATION_POLICY_ID": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_STATE_PROVINCE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_STATE_PROVINCE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT_CF!CF_TEXT005": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT_CF!CF_TEXT012": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_COMPANY_LEVEL1": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_COMPANY_LEVEL4": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_COMPANY_LEVEL3": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_COMPANY_LEVEL2": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_TITLE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!FROM_SALARY_GRADE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_COMPANY_LEVEL1": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_COMPANY_LEVEL4": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_COMPANY_LEVEL3": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_COMPANY_LEVEL2": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT!TO_TITLE": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT_CF!CF_TEXT011": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
+    },
+    "ASSIGNMENT_CF!CF_TEXT004": {
+      "case_sensitive": false,
+      "trim": true,
+      "on_unmapped": "keep",
+      "values": {}
     }
   }
 }

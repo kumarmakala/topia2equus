@@ -120,14 +120,45 @@ def compile_value_mappings():
 
 VALUE_MAPPINGS = compile_value_mappings()
 
+# Equus fields whose value is a country, converted to an ISO 3166-1 alpha-3 code
+ISO3_COUNTRY_FIELDS = set(CONFIG.get("iso3_country_fields", []))
+
+# Colloquial country names pycountry.lookup() does not resolve on its own.
+COUNTRY_ALIASES = {
+    "russia": "RUS", "south korea": "KOR", "north korea": "PRK", "turkey": "TUR",
+    "turkiye": "TUR", "ivory coast": "CIV", "uk": "GBR", "uae": "ARE", "usa": "USA",
+    "united states of america": "USA", "u.s.a.": "USA", "laos": "LAO", "vietnam": "VNM",
+    "czech republic": "CZE", "swaziland": "SWZ", "cape verde": "CPV", "macau": "MAC",
+}
+
+
+def to_iso3(value):
+    """Convert a country name to its ISO-3 code. Input: a name. Return: the alpha-3
+    code, or None when the country cannot be resolved."""
+    import pycountry
+
+    name = str(value).strip()
+    try:
+        return pycountry.countries.lookup(name).alpha_3
+    except LookupError:
+        return COUNTRY_ALIASES.get(name.casefold())
+
 
 def map_value(value, target_field, source_row_number, slot_number=None):
-    """Translate a raw value for its Equus field per value_mappings.
+    """Translate a raw value for its Equus field per value_mappings / ISO-3 rules.
 
     Input: the value, its Equus target, the source row number (for errors) and
     optional slot number. Return: the translated value (or the original when the
-    field has no mapping); raises when an unmapped value has on_unmapped="error".
+    field has no rule); raises when an unmapped value has on_unmapped="error".
     """
+    if target_field in ISO3_COUNTRY_FIELDS:
+        if is_blank(value):
+            return None
+        code = to_iso3(value)
+        if code is None:
+            logger.warning("Country not resolved to ISO-3, kept as-is: %r (%s)", value, target_field)
+            return value
+        return code
     rule = VALUE_MAPPINGS.get(target_field)
     if rule is None:
         return value
